@@ -698,6 +698,7 @@ input:checked + .slider:before { transform: translateX(20px); }
             <button class="btn btn-primary" onclick="refreshTokens()" style="margin-left:8px;">🔄 刷新 Token</button>
             <button class="btn btn-primary" onclick="reloadAuths()" style="margin-left:8px;">📥 重载账号池</button>
             <button class="btn" onclick="refreshStatus()" style="margin-left:8px;">🔄 刷新列表</button>
+            <button class="btn btn-primary" onclick="rotateAccount()" style="margin-left:8px;" title="自动切到最闲+余额最高的可用账号，并清空会话粘性">🎲 一键换号</button>
         </div>
         <table>
             <thead>
@@ -880,7 +881,7 @@ async function refreshStatus() {
                 ? `<small>${a.token}${a.expires_at_human ? '<br>有效至 ' + a.expires_at_human : ''}</small>`
                 : '-';
             const creditsTxt = a.credits != null
-                ? `<b style="color:#fbbf24">${a.credits}</b> · ⚡${a.energy || 0}`
+                ? `<b style="color:${a.credits < 30 ? '#ef4444' : (a.credits < 100 ? '#f59e0b' : '#fbbf24')}">${a.credits}</b> · ⚡${a.energy || 0}`
                 : '-';
             return `
             <tr>
@@ -910,9 +911,15 @@ async function refreshLiveCredits(force) {
             const size = d.total_size || 0;
             const expiring = d.expiring_7d || 0;
             el.textContent = remain + (size ? ' / ' + size : '');
-            el.style.color = remain > 0 ? '#f59e0b' : '#ef4444';
+            // 三档颜色：>100 常规橙、30-100 警示黄、<30 危险红；0 也归入红
+            el.style.color = remain > 100 ? '#f59e0b' : (remain > 30 ? '#fb923c' : '#ef4444');
+            // 同步把总积分卡片也染色，让顶部一眼可见
+            const statCredits = document.getElementById('stat-credits');
+            if (statCredits) {
+                statCredits.style.color = remain > 100 ? '' : (remain > 30 ? '#f59e0b' : '#ef4444');
+            }
             const tsText = d.queried_at
-                ? '查询于 ' + new Date(d.queried_at).toLocaleTimeString() + (expiring > 0 ? ' · ⚠️' + expiring + ' 7天内到期' : '')
+                ? '查询于 ' + new Date(d.queried_at).toLocaleTimeString() + (expiring > 0 ? ' · ⚠️' + expiring + ' 7天内到期' : '') + (remain < 30 ? ' · 🚨 余额告急' : (remain < 100 ? ' · ⚠️ 余额偏低' : ''))
                 : (force ? '强制刷新失败' : '无数据');
             ts.textContent = tsText;
         } else {
@@ -1198,6 +1205,28 @@ async function switchAccount(accountId) {
         }
     } catch (e) {
         alert('切换失败: ' + e.message);
+    }
+}
+
+async function rotateAccount() {
+    // 一键换号：让网关自动挑下一个最闲+余额最高的可用账号，并清空所有会话粘性
+    if (!confirm('要自动切换到下一个可用账号吗？\n（会清空当前所有会话粘性）')) return;
+    try {
+        const resp = await fetch('/api/gateway/api/switch', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + API_KEY},
+            body: JSON.stringify({ rotate: true })
+        });
+        const result = await resp.json();
+        if (result.success) {
+            alert('已换号到: ' + result.account_id);
+            refreshStatus();
+            loadGatewayInfo();
+        } else {
+            alert('换号失败: ' + (result.error || JSON.stringify(result)));
+        }
+    } catch (e) {
+        alert('换号失败: ' + e.message);
     }
 }
 

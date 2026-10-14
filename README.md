@@ -51,7 +51,7 @@
 
 WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 CodeBuddy（`copilot.tencent.com`）账号包装为统一的 `/v1/chat/completions` 服务。
 
-- 官方不提供 OpenAI 形态的开放 API，本项目通过 **OAuth 设备授权**（面板「添加账号」或 `login.sh`）获取账号凭证，在网关侧做 token 自动刷新、账号池调度与流量治理；
+- 官方不提供 OpenAI 形态的开放 API，本项目通过 **OAuth 设备授权**（WebUI「添加账号」按钮，浏览器完成登录）获取账号凭证，在网关侧做 token 自动刷新、账号池调度与流量治理；
 - 面向 **个人多账号** 场景：多账号共享、单号故障自动换号、冷却 / 熔断防止雪崩、会话粘性保证多轮上下文不跳号；
 - 对客户端只暴露 OpenAI 兼容接口，现有 SDK / 前端 / 工具 **零改造接入**。
 
@@ -61,7 +61,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 | 能力 | 说明 |
 |---|---|
-| 🔑 **OAuth 一键登录** | `login.sh` 设备授权流程，自动落盘凭证并重启容器加载新账号 |
+| 🔑 **浏览器 OAuth 登录** | WebUI「添加账号」按钮打开设备授权页面，凭证自动落盘到 `auths/` 并热加载进池（免重启） |
 | 🔄 **多账号池** | 快过期积分加权 + 成本分层 + 加权随机选号，Top-5 候选 + 防惊群 |
 | 🛡️ **熔断与冷却** | 429 软冷却 600s 起指数退避（封顶 `soft_rate_max`）、404 固定 60s 短冷却、402 硬冷却至次日 04:00、连续失败熔断、在途租约限流 |
 | 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑，可镜像 Redis 防重启丢失 |
@@ -162,7 +162,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 |---|---|
 | **Web 管理面板** | `internal/panel`，前端 go:embed 单文件进二进制，零外部依赖。账号池可视化（健康色条 / 积分量条 / 冷却倒计时）、积分到期分布、单号运维、批量任务、日志查看、明暗主题 |
 | **请求指标与脱敏日志** | 面板展示完成成功率 / HTTP 成功率 / 平均耗时 / 最近请求，响应带 `X-Request-Id`；JSONL 只归档请求元数据，不写提示词、响应正文或凭证 |
-| **浏览器内 OAuth 添加账号** | 面板「添加账号」按钮完成设备授权 → 凭证落盘 → **热加载进池（免重启）**，替代命令行 `login.sh` 流程 |
+| **浏览器内 OAuth 添加账号** | 面板「添加账号」按钮完成设备授权 → 凭证落盘 → **热加载进池（免重启）** |
 | **在线配置编辑（热生效）** | 面板直接改 `config.json`：API 密钥 / `soft_rate` / 脱敏开关 / 池参数 / 任务排程**立即生效**；装配期字段（listen 等）保存后提示需重启。写入采用深合并 + 原子替换，保留未知键 |
 | **积分任务体系** | 任务列表 / 接受 / 领取接口 + 面板弹窗；「一键完成」覆盖 **17 个任务**（对话 / 领养 / 桌面行为链 / 模板 / 灵感案例 / 画布 / 专家召唤 / 技能尝鲜 / 主题 / 资料库 / 夜猫子等），推进进度、等待异步计分落定后**自动领奖**，纯 API 零客户端依赖 |
 | **首启自动生成配置** | 目录下无 `config.json` 时自动生成推荐配置（含 `crypto/rand` 随机 `api_key`），双击即开 |
@@ -218,133 +218,85 @@ flowchart LR
 
 ### 环境要求
 
-- **Docker + Docker Compose**（服务端部署方式，镜像内已含低权限用户与全部工具脚本）——或
-- **Windows / macOS / Linux 直接跑单文件二进制**（无需 Docker，见下方「Windows 单文件运行」）
+- **Python 3.10 及以上**（推荐 3.11 / 3.12 / 3.13，64 位）
+- Windows 10+ / macOS 12+ / Linux 均可；本项目是**纯 Python 实现**，无 Go / Docker 依赖
 - 一个或多个已注册的 CodeBuddy 账号，用于 OAuth 登录
-- 宿主机 Go ≥ 1.22（仅从源码构建时需要）
 
-### 方式〇：GHCR 镜像（免克隆免构建）
+### 方式一：Windows 一键启动（推荐）
 
-CI 会自动构建多架构镜像（`amd64` / `arm64`）并发布到 GHCR，`git clone` 之外的部署路径：
+1. 双击项目根目录的 **`一键启动.bat`**（脚本会自动探测已安装的 Python，找不到会给出安装提示）。
+2. 控制台会依次打印网关、面板、WebUI 三个入口 URL，然后自动在默认浏览器打开 WebUI 控制台。
+3. 保持这个命令行窗口打开，WorkBuddy 才在工作；关闭窗口或按 `Ctrl+C` 即停止。
 
-```bash
-# 1. 准备配置与数据目录
-mkdir -p auths data && cp config.example.json config.json
-#    建议编辑 config.json 设置 api_key（或留空由程序自动生成随机密钥）
-
-# 2. 拉取并运行
-docker run -d --name workbuddy2api \
-  -p 7863:7863 -e TZ=Asia/Shanghai \
-  -v ./auths:/app/auths -v ./data:/app/data -v ./config.json:/app/config.json \
-  ghcr.io/<your-github-username>/workbuddy2api-panel:latest
-
-# 3. 健康检查（无可用账号时返回 503）
-curl -s http://localhost:7863/healthz
-```
-
-> **首次发布后须将包设为公开**：GitHub 仓库页 → Packages → `workbuddy2api-panel` →
-> Package settings → Change visibility → Public，否则拉取需要 `docker login ghcr.io`。
->
-> 镜像 tag 规则：`main` 分支推送 `latest` / `main` / `sha-xxxxxx`；打 `v*` tag 额外发布
-> `1.2.3` / `1.2` / `1` 语义化版本；PR 仅构建验证、不推送。
-
-### 方式一：Docker Compose（推荐服务器部署）
+### 方式二：命令行启动（跨平台通用）
 
 ```bash
-# 1. 克隆
-git clone https://github.com/<your-github-username>/<your-repo-name>.git
-cd <your-repo-name>
+# 1) 克隆
+git clone https://github.com/H51806/WorkBuddy_-.git
+cd WorkBuddy_-
 
-# 2. 准备配置（compose 挂载此文件，缺失会导致容器启动失败）
-cp config.example.json config.json
-#    建议编辑 config.json 设置 api_key（或留空由程序自动生成随机密钥）
-
-# 3. 启动（首次会构建镜像，约 1-2 分钟）
-docker compose up -d --build
-
-# 4. 健康检查（无可用账号时返回 503）
-curl -s http://localhost:7863/healthz
-# {"healthy":0,"total":0,"service":"workbuddy2api"}
+# 2) 启动（会同时拉起网关 + WebUI，并自动打开浏览器）
+python main.py
 ```
 
-启动后打开 **`http://localhost:7863/panel/`**，用面板「添加账号」完成登录（见下节）。
+`main.py` 内部动作：`ensure_dirs()` 建 `wb_data/` → `subprocess.Popen([sys.executable, "-u", "wb_gateway.py"])` 起网关（`127.0.0.1:7863`）→ `ThreadingHTTPServer(("127.0.0.1", 8789), WebUIHandler)` 起 WebUI → 延迟 1.5 秒 `webbrowser.open`。
 
-常用运维命令：
+### 三个入口 URL
 
-```bash
-docker compose logs -f          # 跟踪日志
-docker compose restart          # 重启
-docker compose down             # 停止并移除容器（数据在 ./auths 与 ./data，不受影响）
-```
+启动完成后浏览器会打开控制台；也可以直接访问：
 
-### 方式二：Windows 单文件运行（无需 Docker）
-
-```powershell
-# 1) 下载 Release 中的 wb2api.exe，或从源码构建
-go build -trimpath -ldflags="-s -w" -o wb2api.exe ./cmd/server
-
-# 2) 直接运行：首次启动自动生成 config.json（含随机 api_key，日志打印一次）
-.\wb2api.exe -config config.json
-
-# 3) 浏览器打开面板添加账号
-#    http://127.0.0.1:7863/panel/
-```
-
-exe 为**单文件自包含**（前端资源已 embed 进二进制），拷到任意 Windows 机器即可运行，只需保证 `auths/`（凭证）与 `data/`（状态）目录可写。
-
-### 方式三：源码运行（开发调试）
-
-```bash
-go build ./...
-go vet ./...
-go test ./...                      # 完整测试套件
-go run ./cmd/server -config config.json
-```
-
-构建全部二进制：
-
-```bash
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o wb2api ./cmd/server
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o signin_bin ./cmd/signin
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o login ./cmd/login
-CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o credit ./cmd/credit
-```
+| 入口 | URL | 说明 |
+|---|---|---|
+| **网关** | `http://127.0.0.1:7863` | OpenAI 兼容 API 端点（`/v1/chat/completions` / `/v1/models` / `/status` / `/healthz`） |
+| **网关面板** | `http://127.0.0.1:7863/panel/` | 上游 Go 项目留下的简易面板，本项目主要用 WebUI 控制台，此面板做兜底 |
+| **WebUI 控制台** | `http://127.0.0.1:8789` | 本项目自研的管理控制台：账号池 / 实时余额 / 一键换号 / 任务日志 / 报表下载 |
 
 ### 添加账号（登录）
 
-**方式 A：Web 面板（推荐，各平台通用，免命令行）**
+打开 WebUI 控制台 `http://127.0.0.1:8789` → 左侧「账号池」→ 右上角「**添加账号**」按钮：
 
-打开 `http://127.0.0.1:7863/panel/`，点右上角「**添加账号**」：面板展示授权链接 → 浏览器完成登录 → 自动检测并落盘凭证 → **热加载进池（无需重启）**，顺带完成首次签到。
+1. 浏览器自动打开 CodeBuddy 设备授权页；完成登录（邮箱 / 手机号 / QQ / 微信，任选）。
+2. 授权回调后凭证以 JSON 形式落盘到 `auths/workbuddy-<uid>.json`（`0600` 权限）。
+3. 网关**热加载**新账号进池，无需重启；同时触发一次首次签到把当天的 credits 领出来。
 
-**方式 B：命令行脚本（仅 Linux / macOS，依赖 bash + python3）**
+已过期 / Session 失效的账号可在同一个「账号池」面板里点「**重新登录**」走相同流程覆盖凭证。
 
-```bash
-./login.sh
-# 按提示在浏览器打开授权链接 → 回到终端确认 → 凭证落盘 auths/workbuddy-<uid>.json
+### 编辑 API Key
+
+WebUI「设置」→ 修改 `GATEWAY.api_key` 并保存；也可直接编辑 `config.py` 顶部：
+
+```python
+GATEWAY = {
+    "port": 7863,
+    "api_key": "sk-CHANGEME-please-set-your-own-key",  # ← 改这里
+}
 ```
 
-`login.sh` 内置授权 URL 获取 + 浏览器登录 + token 轮询 + 首次签到 + 凭证落盘 + 容器重启，全程无 PKCE（state 由服务端签发）。账号池在容器启动时用 `auths/` 目录自动对齐，新增凭证文件即自动发现。
-
-> Windows 用户请用方式 A（或 WSL）；`login.sh` 需要 python3。
+改完 `api_key` 需要重启网关（`Ctrl+C` 再 `python main.py`），WebUI 内其它字段的修改即时生效。
 
 ### 验证
 
 ```bash
 # 模型列表
-curl -s http://localhost:7863/v1/models -H "Authorization: Bearer your-api-key"
+curl -s http://127.0.0.1:7863/v1/models \
+  -H "Authorization: Bearer sk-你的-api-key"
 
 # 账号状态（汇总 + 每账号详情，disabled 账号透出 disabled_reason）
-curl -s http://localhost:7863/status -H "Authorization: Bearer your-api-key"
+curl -s http://127.0.0.1:7863/status \
+  -H "Authorization: Bearer sk-你的-api-key"
+
+# 健康检查（无可用账号时返回 503）
+curl -s http://127.0.0.1:7863/healthz
 
 # 流式聊天
-curl -sN http://localhost:7863/v1/chat/completions \
-  -H "Authorization: Bearer your-api-key" \
+curl -sN http://127.0.0.1:7863/v1/chat/completions \
+  -H "Authorization: Bearer sk-你的-api-key" \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}'
 
-# 非流式聊天（本地聚合）
-curl -s http://localhost:7863/v1/chat/completions \
-  -H "Authorization: Bearer your-api-key" \
+# 非流式聊天（本地聚合为单响应）
+curl -s http://127.0.0.1:7863/v1/chat/completions \
+  -H "Authorization: Bearer sk-你的-api-key" \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":false}'
 ```
@@ -453,7 +405,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 |---|---|---|---|
 | 余额不足 | HTTP 402 / body 含余额关键词 | 硬冷却到**次日 04:00**（本地时区） | 签到（09/21 点）余额恢复自动解冻 |
 | 频控 | HTTP 429 / 限流文案（不限状态码） | 软冷却 `soft_rate`（600s 起，连续触发指数退避，封顶 `soft_rate_max`）。**`code 6004`（模型级）带「将在 … 重置」时**冷却到上游重置墙钟并豁免切模型（见[常见问题](#429-code6004模型级限流的冷却语义)） | 到期自动恢复 / 成功清零退避 |
-| Session 失效 | body 含 `Offline user session not found` / `12153` | **连续 3 次**才永久禁用（一次 12153 多为临时抖动：网络 / 闪断 / refresh 竞态）；刷新成功 / 任意成功 / 手工复活清计数 | 人工重新登录（`login.sh`）或 `ReviveDisabled` 复活 |
+| Session 失效 | body 含 `Offline user session not found` / `12153` | **连续 3 次**才永久禁用（一次 12153 多为临时抖动：网络 / 闪断 / refresh 竞态）；刷新成功 / 任意成功 / 手工复活清计数 | 在 WebUI「账号池」对该账号点「重新登录」走一遍 OAuth 覆盖凭证 |
 | 上游 404 | HTTP 404 | 软冷却固定 60s（不随 `soft_rate`、不单独退避） | 到期自动恢复 |
 | 服务端错误 | HTTP ≥500 | 喂连续失败计数，达阈值熔断 | 熔断到期 / 成功清零 |
 | 请求体解析失败 | HTTP 400 + `Unmarshal chat params failed` / code `11101` | **不罚账号，但仍轮转**（客户端畸形 JSON，换号照样 400） | 即时 |
@@ -566,7 +518,7 @@ curl -s http://localhost:7863/v1/chat/completions \
 - `conversationId` 由网关生成（`wb2api-<ms>`），无需真实会话
 - 限速：账号间间隔 800ms（与旅行同口径）
 - **streak 自检**：上报成功后回读连登天数（只读 oracle），日志每号一行可 grep：`activity <uid>: streak days=N`。`days=0` 记 **warn**（`report OK but streak.days=0 (silent drop?)`，对应上游「200 但静默丢弃」）；回读失败记 warn 但不影响主流程（上报按天幂等，不重试，只观测）
-- 手动诊断 / 补跑用 `python3 scripts/probe_active.py`（只读探测；写操作默认 dry-run，需 `--yes`）
+- 手动诊断 / 补跑直接调用 `wb_tasks.py` 里的对应任务函数（例如 `python wb_tasks.py --task=activity_report`，具体 flag 见脚本头部注释）
 
 #### 猫猫旅行（独立排程）
 
@@ -736,61 +688,43 @@ http://127.0.0.1:7863/panel/
 
 ## 部署运维
 
-### Docker 镜像
+本项目是**纯 Python 单进程**服务，无 Docker / Go 依赖；部署 = 把代码放到一台能跑 Python 3.10+ 的机器上，执行 `python main.py` 即可。
 
-多阶段镜像（`golang:1.23-alpine` 构建 → `alpine:3.20` 运行）一次编译全部四个二进制并随镜像分发：
-
-- **wb2api**（主服务）、**signin_bin**、**login**、**credit** + 脚本（`login.sh` / `signin.sh` / `credit.sh` / `scripts/probe_active.py`）
-- 以 `app` 用户（uid 10001）运行，`app/auths` 与 `app/data` 预建
-- 镜像内默认落 `config.example.json` 作为空配置（不含密钥），生产用挂载卷覆盖 `/app/config.json`
-- 内置 `HEALTHCHECK`（`wget /healthz`，30s 间隔）
-
-账号 / 数据通过 `docker-compose.yml` 卷挂载持久化：`./auths`、`./data`、`./config.json`。
-
-### 工具脚本
-
-| 脚本 | 用途 |
-|---|---|
-| `./login.sh` | OAuth 登录 → 落盘 auth → 重启容器 |
-| `./signin.sh [auths_dir]` | 批量签到（过期先刷新） |
-| `./credit.sh` / `./credit.sh -json` | 积分日报（美化 / 原始 JSON） |
-| `python3 scripts/probe_active.py` | 活跃上报手动诊断 / 补跑（probe=只读 / report=单号上报 / unlock=单号领猫 / ALL=全池；写操作默认 dry-run，需 `--yes`） |
-| `python3 scripts/probe_max_tokens.py` | 探测各模型**真实输出上限**（区分静默钳制与模型主动收尾），`--panel-out` 结果可直接进面板展示（见下节） |
-
-二进制不在 git 中：脚本首次使用自动 `go build` 对应 `cmd/*`（Docker 镜像内已预编译）。
-
-### 探测模型真实输出上限
-
-上游 `/v3/config` 里的 `max_output_tokens` 是**声称值**，普遍虚高：实测 16 个 CN 模型中 8 个被
-**静默钳制**（请求 `max_tokens` 更大也不报错，输出到真实上限即截断），最狠的声称 1M 实际 32K。
-「模型与档位」视图因此支持在最大输出列叠加**实测标注**：
-
-- 🔴 `32K ⚠ 钳制 12×` —— 实测被截断于 32K，声称值的 1/12（`finish=length` 判据，可信）
-- 🟢 `48K ✓ / 64K ↑` —— 实测与声称一致 / 实际比声称更大
-- ⚪ `≥40K` / `?` —— 满额未触顶（下界）/ 模型主动收尾未测出
-
-实测值**不写死在代码里**——它来自探测工具写入的数据文件，上游调整后重跑一次即自动刷新：
+### 常用命令
 
 ```bash
-# 在网关所在机器上（探测会真实消耗积分；单模型预算默认 600s，并行 4）
-python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-xxx   --panel-out data/output_probes.json
+# 一键任务（17/18 全自动：成长任务 + 连登管家 + 猫猫旅行 + 活跃上报）
+python wb_tasks.py
 
-# 断点续测 / 只测指定模型 / 预览计划
-... --resume
-... --models cn:glm-5.2 --panel-out data/output_probes.json
-... --dry-run
+# 实时余额查询（拉一次当前账号池所有账号的 credits，刷新 WebUI 卡片）
+python wb_live_credits.py
+
+# 积分采集 / 报表（生成每日积分采集报告，产物落 wb_data/）
+python wb_credits_fetcher.py
+
+# 自检（校验环境、依赖、目录权限、网络连通性）
+python selfcheck.py
 ```
-
-文件落在 state 文件同目录（默认 `data/output_probes.json`，`data/` 已被 gitignore），面板
-`GET /panel/api/model_probes` 只读透传，写入后**下次查询即生效，无需重启网关**；未探测的
-模型不受影响。探测判据（两种停止的区分 / 提示词量级匹配 / 并行与时间预算）的设计细节
-见脚本头部注释。
 
 ### 账号管理
 
-- 多账号复制 `auths/workbuddy-<uid>.json` 即可，池启动时自动对齐目录
-- Session 失效账号被禁用（`disabled_reason` 透出在 `/status`）后，可用 `./login.sh` 重新登录覆盖凭证；已持久化 `disabled=true` 的账号可在源码侧调用 `Pool.ReviveDisabled(uid)` 复活（`state.json` 中清除 `disabled` 标志）
-- 备份 = `auths/`（凭证）+ `data/state.json`（池状态：积分 / 冷却 / 计数）；配置 Upstash 后状态另镜像至 Redis（7 天 TTL）
+- 多账号：在 WebUI「账号池」点「添加账号」重复添加即可；凭证落盘到 `auths/workbuddy-<uid>.json`，网关**热加载**进池（免重启）。
+- Session 失效账号会被禁用（`disabled_reason` 透出在 `/status`）；在 WebUI「账号池」对该账号点「重新登录」走一遍 OAuth 覆盖凭证即可复活（本项目**不提供源码级 `ReviveDisabled` API**——重新登录就是最快的复活方式）。
+- 备份 = `auths/`（凭证）+ `wb_data/`（状态：积分 / 冷却 / 计数 / 任务日志）。这两类目录已被 `.gitignore` 排除。
+
+### 日志与文件布局
+
+| 路径 | 内容 |
+|---|---|
+| `config.py` | 用户可编辑配置（`GATEWAY.api_key` / `CONSOLE.port` / `AUTOTASKS` 等） |
+| `config.example.json` | 占位符模板（本仓库唯一公开的 JSON 配置参考） |
+| `auths/workbuddy-<uid>.json` | OAuth 凭证（明文 `accessToken` / `refreshToken`，权限 `0600`） |
+| `wb_data/state.json` | 账号池状态：积分 / 冷却 / 计数 / disabled 标志 |
+| `wb_data/tasks_log.jsonl` | 任务执行流水（一行一条 JSON） |
+| `wb_data/credits_history*.json` | 每日积分采集历史 |
+| `wb_data/*.html` / `*.png` | 报表与截图产物 |
+
+以上运行时产物**全部**由 `.gitignore` 排除，不会进入版本控制。
 
 ## 安全与合规
 
@@ -798,8 +732,8 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 
 - **位置**：`./auths`（`auth_dir` 可配），文件名 `workbuddy-<uid>.json`
 - **内容**：明文 `accessToken` / `refreshToken` + 账号元信息（`account.uid` / `enterpriseId` / `nickname`）
-- **权限**：容器内以 `app` 用户（uid 10001）运行；token 刷新由 `SaveAtomic` 以 `0600` 原子写回（tmp + rename）；`login.sh` 首次落盘遵循登录 umask，建议手动 `chmod 600 auths/*.json`
-- **切勿提交 git**：`.gitignore` 已排除 `auths/`、`data/`、`backups/`、`config.json`、`*.key`、`*.pem`、`*.env`、`docs/` 及除 README 外的全部 `*.md` 工作文档
+- **权限**：token 刷新以 `0600` 权限原子写回（tmp 文件 + rename），Python 侧用 `os.chmod` 保证
+- **切勿提交 git**：`.gitignore` 已排除 `auths/`、`wb_data/`、`config.json`、`*.key`、`*.pem`、`*.env` 及日志临时产物
 
 ### 2. 网络暴露与日志敏感度
 
@@ -809,9 +743,8 @@ python3 scripts/probe_max_tokens.py   --base http://127.0.0.1:7863/v1 --key sk-x
 
 ### 3. 发布来源与合规边界
 
-- **无预编译 release**：仓库无 Release / tag，产物 = 源码自构建（Dockerfile 多阶段在本地构建时完成）
-- 登录 / 签到 / 积分工具：`./login.sh` / `./signin.sh` / `./credit.sh`
-- **无产物校验和**：`go.sum` 仅约束 Go 模块依赖；Docker 镜像由本地 `docker compose build` 生成，未引用第三方镜像
+- **纯 Python 源码分发**：本仓库只发源码，无预编译二进制 / 无 Docker 镜像 / 无第三方运行时依赖（除了 `pip install` 的少量第三方库）
+- 登录 / 任务 / 积分工具全部是本仓库根目录下的 Python 脚本：`wb_tasks.py` / `wb_live_credits.py` / `wb_credits_fetcher.py` / `selfcheck.py`（WebUI「添加账号」按钮走浏览器 OAuth）
 - 上游 CodeBuddy 属腾讯系商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
 
 ### 4. 授权使用边界

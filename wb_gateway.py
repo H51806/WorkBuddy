@@ -195,12 +195,42 @@ class AccountPool:
             if self.current_account_id == acc_id:
                 self.current_account_id = None
     
-    def switch_account(self, acc_id: str) -> bool:
-        """切换当前账号"""
-        if acc_id in self.accounts:
-            self.current_account_id = acc_id
-            return True
-        return False
+    def switch_account(self, acc_id: Optional[str] = None) -> Optional[str]:
+        """切换当前账号。
+
+        - 传入 acc_id：强制切到该账号（若存在）
+        - acc_id=None/空：自动挑下一个最闲+余额最高的可用账号（等价于"换号"）
+        - 切换成功一律清空 sticky_sessions，避免旧粘性把新账号绑死
+
+        返回：切换后的账号 id（成功），None（池空或指定账号不存在）
+        """
+        target_id: Optional[str] = None
+        if acc_id and acc_id in self.accounts:
+            target_id = acc_id
+        else:
+            # 排除 current 本身；若无 current 或 current 已不可用，则任意可用即可
+            candidates = [
+                a for a in self.accounts.values()
+                if self._is_available(a) and a.active and a.id != self.current_account_id
+            ]
+            if not candidates:
+                candidates = [
+                    a for a in self.accounts.values()
+                    if self._is_available(a) and a.active
+                ]
+            if candidates:
+                # 与 pick() 保持一致：先按 last_used 升序（最久没用），再按 credits 降序（余额最多）
+                candidates.sort(key=lambda a: (a.last_used, -a.credits))
+                target_id = candidates[0].id
+
+        if not target_id:
+            return None
+
+        self.current_account_id = target_id
+        # 关键：清掉粘性，否则旧 session 会继续被粘到旧账号，切换形同虚设
+        self.sticky_sessions.clear()
+        self.session_ttl.clear()
+        return target_id
     
     def get_status(self) -> Dict:
         """获取状态"""
@@ -1202,16 +1232,17 @@ class GatewayHandler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             request_data = {}
         
-        acc_id = request_data.get("account_id") or request_data.get("id")
-        if not acc_id:
-            self._send_error("account_id is required", 400)
-            return
-        
-        if pool.switch_account(acc_id):
+        acc_id = request_data.get("account_id") or request_data.get("id") or None
+        # 空 body / 只带 rotate=true → 自动挑下一个（"一键换号"）
+        if request_data.get("rotate") is True and not acc_id:
+            acc_id = None
+
+        new_id = pool.switch_account(acc_id)
+        if new_id:
             pool.save(STATE_FILE)
-            self._send_json({"success": True, "account_id": acc_id, "status": pool.get_status()})
+            self._send_json({"success": True, "account_id": new_id, "status": pool.get_status()})
         else:
-            self._send_error("Account not found", 404)
+            self._send_error("No available account", 409)
 
     def _handle_tasks_api(self):
         """成长任务中心 & 保活 API。"""
