@@ -28,7 +28,17 @@ DATA_DIR = BASE_DIR / "wb_data"
 CONSOLE_PORT = 8789
 GATEWAY_PORT = 7863
 GATEWAY_URL = f"http://127.0.0.1:{GATEWAY_PORT}"
-API_KEY = "sk-CHANGEME-please-set-your-own-key"
+
+# 从 config.json 读真实的 api_key；读不到时保留占位符（网关侧无 key 时也不校验）
+def _load_api_key() -> str:
+    cfg = BASE_DIR / "config.json"
+    try:
+        with open(cfg, "r", encoding="utf-8") as f:
+            return json.load(f).get("api_key", "") or ""
+    except Exception:
+        return ""
+
+API_KEY = _load_api_key() or "sk-CHANGEME-please-set-your-own-key"
 
 # 状态
 collect_proc = None
