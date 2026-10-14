@@ -1,0 +1,100 @@
+# ============================================
+# WorkBuddy 统一管理器 - .gitignore
+# ============================================
+# 目的：防止任何账号凭证、运行时数据、密钥、缓存被推送到公开仓库
+# 反向工程风险：auths/ 里的 JWT、data/state.json 里的 token 都能直接反解出真实账号
+# ============================================
+
+# ---------- 1. 账号凭证（最高优先级！明文 JWT）----------
+auths/
+auths/*.json
+
+# ---------- 2. 运行时数据（含姓名、手机号、token、会话态）----------
+data/
+data/*.json
+data/state.json
+data/login_sessions.json
+data/usage.json
+data/request-logs/
+
+# ---------- 3. 采集产物（截图、报表、日志、Cookie）----------
+wb_data/
+wb_data/*.json
+wb_data/*.html
+wb_data/*.png
+wb_data/*.txt
+wb_data/login_state_*.json
+wb_data/identity_*.json
+wb_data/report_*.html
+wb_data/latest_report.html
+wb_data/screenshot_*.png
+wb_data/collect_log.txt
+wb_data/fetch_log.txt
+wb_data/main_out.txt
+wb_data/main_err.txt
+wb_data/credits_history*.json
+wb_data/request-logs/
+
+# ---------- 4. 生产配置（含真实 api_key）----------
+# 只提交 config.example.json 作为模板；config.json 由用户本地从 example 复制生成
+config.json
+
+# ---------- 5. 二进制产物（体积大且非源码）----------
+*.exe
+*.dll
+*.so
+*.dylib
+wb2api.exe
+
+# ---------- 6. Python 缓存 ----------
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+env/
+
+# ---------- 7. Go 工具链缓存（如果曾在本目录跑过 go build）----------
+gocache/
+gopath/
+go/
+vendor/
+
+# ---------- 8. 编辑器 / 操作系统 ----------
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---------- 9. 日志 ----------
+*.log
+logs/
+
+# ---------- 10. 本地临时文件 ----------
+*.tmp
+*.bak
+*.bak.json
+*~
+.#*
