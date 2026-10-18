@@ -1,0 +1,121 @@
+# ============================================================================
+# WorkBuddy 统一管理器 -> DSH 接入片段（Phase4）
+# ----------------------------------------------------------------------------
+# 作用：把本机 WorkBuddy 网关（http://127.0.0.1:7863/v1）注册成 DSH 的一个模型路由，
+#       路由名 workbuddy-manager，之后在聊天界面的「模型」选择器里就能直接选用。
+#
+# 状态（2026-10-17）：本片段**已经装进** C:\Users\<你的用户名>\.dsh\profiles\desktop\cordis.patch.yml
+#   （llm-pi-ai -> config -> providers 下的 workbuddy-manager 块），并已在
+#   C:\Users\<你的用户名>\.dsh\.credentials.yaml 的 refs 段加了 WORKBUDDY_API_KEY。
+#   文件在此保留作**参考 / 重装 / 迁机**用；还原点见同目录 *.bak-pre-workbuddy。
+#   想改端口或模型清单，改已装入的那份（或改这里后再粘贴一遍）。
+#
+# 粘贴位置：用户补丁层 C:\Users\<你的用户名>\.dsh\profiles\desktop\cordis.patch.yml
+#           找到 `- id: llm-pi-ai` -> `config:` -> `providers:`，
+#           把下面 workbuddy-manager: 起、到 models: 列表结束的整段（含缩进）
+#           粘到 sensenova: / nvidia: 那两段的同级位置（键缩进 6 空格）。
+#
+# 重要：providers 是「字典」，同一 id 的条目重复出现会整块覆盖，
+#       所以不要另起一个 `- id: llm-pi-ai` 条目 —— 那会把 sensenova / nvidia 丢掉。
+#
+# 凭据：workbuddy-manager 是手工声明的路由，pi-ai 不允许对它做 OAuth 登录
+#       （写凭据记录会报 UNSTORABLE_PROVIDER_ID），因此只能走 apiKeyEnv。
+#       请把 WORKBUDDY_API_KEY 环境变量设成 config.json 里的 api_key；
+#       该变量解析为空时请求会以 MISSING_CREDENTIAL 失败。
+#       若 config.json 的 api_key 是空串，网关根本不校验 Authorization
+#       （wb_gateway.py:1356-1365），此时随便填一个非空占位值即可。
+# ============================================================================
+      workbuddy-manager:
+        displayName: WorkBuddy 统一管理器
+        apiKeyEnv: WORKBUDDY_API_KEY
+        api: openai-completions
+        baseURL: http://127.0.0.1:7863/v1
+        # 未在目录里写明上下文窗口的模型会落到这两个默认值
+        defaultContextWindow: 262144
+        defaultMaxTokens: 32768
+        models:
+          - id: deepseek-v4-flash
+            name: DeepSeek-V4-Flash
+            input:
+              - text
+              - image
+            # 网关默认兜底模型
+          - id: deepseek-v4.1-flash
+            name: DeepSeek-V4.1-Flash
+            input:
+              - text
+              - image
+          - id: deepseek-v4.1-flash-sg
+            name: DeepSeek-V4.1-Flash (SG)
+            # 仅国际版
+          - id: deepseek-v4-pro
+            name: DeepSeek-V4-Pro
+            input:
+              - text
+              - image
+          - id: deepseek-v3
+            name: DeepSeek-V3
+          - id: deepseek-v3.2
+            name: DeepSeek-V3.2
+          - id: deepseek-r1
+            name: DeepSeek-R1
+            reasoningEfforts:
+              low: low
+              high: high
+          - id: glm-5.3
+            name: GLM-5.3
+            input:
+              - text
+              - image
+            reasoningEfforts:
+              low: low
+              high: high
+              max: max
+          - id: glm-5.3-flash
+            name: GLM-5.3-Flash
+            input:
+              - text
+              - image
+            reasoningEfforts:
+              low: low
+              high: high
+              max: max
+          - id: glm-5.2
+            name: GLM-5.2
+            input:
+              - text
+              - image
+          - id: glm-5.1
+            name: GLM-5.1
+            input:
+              - text
+            # 纯文本模型
+          - id: kimi-k3
+            name: Kimi-K3
+          - id: minimax-m3
+            name: MiniMax-M3
+          - id: hy3
+            name: Hy3
+            # 仅国内版，被限流时网关自动退到 hy3-x
+          - id: hy4-preview
+            name: Hy4 preview
+            # 限时免费
+
+# ----------------------------------------------------------------------------
+# 可选：让 DSH 默认就用 WorkBuddy 池里的模型
+#   不改也能用 —— 在聊天界面的「模型」选择器里选 WorkBuddy 即可。
+#   想改默认，请直接改本文件顶部【已有的】那一条 agent-default-model，
+#   而不要新增同名条目（同为 id 覆盖，行为按整块替换，容易把别的字段冲掉）：
+#
+# - id: agent-default-model
+#   name: "@deepseek-ai/dsh-agent-default-model"
+#   config:
+#     provider: workbuddy-manager
+#     model: deepseek-v4-flash
+# ----------------------------------------------------------------------------
+
+# 验证（网关需先 python main.py 起来）：
+#   curl -s http://127.0.0.1:7863/v1/models -H "Authorization: Bearer <api_key>"
+#   curl -s http://127.0.0.1:7863/v1/chat/completions -H "Authorization: Bearer <api_key>" \
+#        -H "Content-Type: application/json" \
+#        -d "{\"model\":\"deepseek-v4-flash\",\"messages\":[{\"role\":\"user\",\"content\":\"你好\"}]}"

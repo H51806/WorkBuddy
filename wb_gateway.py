@@ -27,6 +27,7 @@ from pathlib import Path
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse, parse_qs, quote
 from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Any
 from dataclasses import dataclass, field, asdict
@@ -39,6 +40,20 @@ STATE_FILE = DATA_DIR / "state.json"
 USAGE_FILE = DATA_DIR / "usage.json"
 AUTH_DIR = BASE_DIR / "auths"
 CHAT_BASE = "https://copilot.tencent.com"
+#: 国际版（凭据域名是 www.workbuddy.ai）的聊天上游。把国际版 token 打到国内域名上
+#: 会被 openresty 直接回 401 Authorization Required —— 这是「DSH 里必失败」的根因。
+GLOBAL_CHAT_BASE = "https://www.workbuddy.ai"
+GLOBAL_ORIGIN = "https://www.workbuddy.ai"
+#: 一次请求最多换几个账号（401/403 视为凭据不可用，换号重试）。
+MAX_ACCOUNT_TRIES = 3
+#: 鉴权失败后给该账号的冷却秒数：避免它继续被选中把整池请求打死。
+AUTH_FAIL_COOLDOWN = 600.0
+#: 上游 code=11128「request illegal / 请求被拦截，请重新发送」是反探测拦截，属瞬时失败
+#: （上游自己的文案就要求「重新发送」）。旧版把它当普通 400 原样回给客户端，DSH 这类客户端
+#: 不会自动重试，用户就看到一次假失败。这里：先原地重发，再给短冷却换号。
+ANTIPROBE_RETRY_DELAY = 0.8
+ANTIPROBE_MAX_RETRIES = 2
+ANTIPROBE_FAIL_COOLDOWN = 60.0
 
 # 上游真实可用的模型 id（逐个实测确认，其它名字上游一律回
 # {"code":11102,"msg":"model [x] service info not found"}）。
@@ -67,9 +82,21 @@ DEFAULT_CONFIG = {
     },
     "pool": {
         "max_in_flight": 3,
+        "distribution": "priority",
+        "region": "",
         "breaker_threshold": 3,
         "breaker_cooldown": "30m",
         "prefer_expiring": True
+    },
+    "models": {
+        "enabled": True,
+        "file": "./data/models.json"
+    },
+    "usage": {
+        "enabled": True,
+        "file": "./data/usage.json",
+        "retention_days": 90,
+        "flush_interval_seconds": 5
     },
     "schedule": {
         "checkin_hours": [9, 21],
@@ -85,6 +112,60 @@ logging.basicConfig(
     datefmt="%H:%M:%S"
 )
 log = logging.getLogger("wb-gateway")
+
+# ===== Token 统计模块（可选：缺失时网关照常工作） =====
+try:
+    import wb_usage
+    log_usage_import_err = None
+except Exception as _usage_import_exc:  # pragma: no cover - 仅模块缺失/损坏时触发
+    wb_usage = None
+    log_usage_import_err = _usage_import_exc
+    log.warning("wb_usage 导入失败，Token 统计不可用: %s", _usage_import_exc)
+
+# ===== 模型目录模块（可选：缺失时 /v1/models 退回内置列表） =====
+try:
+    import wb_models
+    log_models_import_err = None
+except Exception as _models_import_exc:  # pragma: no cover - 仅模块缺失/损坏时触发
+    wb_models = None
+    log_models_import_err = _models_import_exc
+    log.warning("wb_models 导入失败，/v1/models 退回内置列表: %s", _models_import_exc)
+
+# ===== 账号池分配策略模块（可选：缺失时退回老式轮换） =====
+try:
+    import wb_pool_policy
+    log_policy_import_err = None
+except Exception as _policy_import_exc:  # pragma: no cover - 仅模块缺失/损坏时触发
+    wb_pool_policy = None
+    log_policy_import_err = _policy_import_exc
+    log.warning("wb_pool_policy 导入失败，账号池退回老式轮换: %s", _policy_import_exc)
+
+# ===== 每日签到 / 收益账本模块（可选：缺失时面板签到位不可用） =====
+try:
+    import wb_checkin
+    log_checkin_import_err = None
+except Exception as _checkin_import_exc:  # pragma: no cover - 仅模块缺失/损坏时触发
+    wb_checkin = None
+    log_checkin_import_err = _checkin_import_exc
+    log.warning("wb_checkin 导入失败，签到与收益账本不可用: %s", _checkin_import_exc)
+
+# ===== 桌面快照发现模块（可选：缺失时快照发现位不可用） =====
+try:
+    import wb_snapshot
+    log_snapshot_import_err = None
+except Exception as _snapshot_import_exc:  # pragma: no cover - 仅模块缺失/损坏时触发
+    wb_snapshot = None
+    log_snapshot_import_err = _snapshot_import_exc
+    log.warning("wb_snapshot 导入失败，桌面快照发现不可用: %s", _snapshot_import_exc)
+
+# ===== 公共运维模块（采集 / 自检；缺失时面板的采集与诊断位不可用） =====
+try:
+    import wb_ops
+    log_ops_import_err = None
+except Exception as _ops_import_exc:  # pragma: no cover - 仅模块缺失/损坏时触发
+    wb_ops = None
+    log_ops_import_err = _ops_import_exc
+    log.warning("wb_ops 导入失败，采集与诊断不可用: %s", _ops_import_exc)
 
 # ===== 数据模型 =====
 
@@ -114,39 +195,106 @@ class AccountPool:
     accounts: Dict[str, Account] = field(default_factory=dict)
     current_account_id: Optional[str] = None
     sticky_sessions: Dict[str, str] = field(default_factory=dict)  # session_id -> account_id
-    session_ttl: Dict[str, float] = field(default_factory=dict)  # session_id -> expires_at
-    
-    def pick(self, session_id: Optional[str] = None) -> Optional[Account]:
-        """选择账号"""
-        # 1. 粘性会话优先
+    session_ttl: Dict[str, float] = field(default_factory=dict)  # session_id -> 上次绑定时间
+    cursors: Dict[str, int] = field(default_factory=dict)        # 'policy|region' -> 轮换游标
+
+    # ---- 分配策略参数（由 config.json 的 pool / cooldown 节注入）----
+    distribution: str = "priority"      # priority | round-robin | balanced | sticky
+    region: str = ""                    # "" / merged = 跨区混池
+    credit_floor: float = 0.0
+    prefer_expiring: bool = False
+    expiring_soon: float = 0.0
+    idle_weight_per_hour: float = 0.5
+    idle_weight_max: float = 5.0
+    breaker_threshold: int = 3
+    breaker_cooldown: float = 1800.0
+    rate_cooldown: float = 600.0
+    last_pick_policy: str = ""
+    last_pick_reason: str = ""
+
+    # ---- 与策略模块的状态桥接 ----
+    def _policy_state(self) -> Any:
+        if wb_pool_policy is None:
+            return None
+        return wb_pool_policy.PolicyState(
+            cursors=dict(self.cursors),
+            sticky=dict(self.sticky_sessions),
+            sticky_at=dict(self.session_ttl),
+        )
+
+    def _apply_policy_state(self, state: Any) -> None:
+        if state is None:
+            return
+        self.cursors = dict(getattr(state, "cursors", {}) or {})
+        self.sticky_sessions = dict(getattr(state, "sticky", {}) or {})
+        self.session_ttl = dict(getattr(state, "sticky_at", {}) or {})
+
+    def _pick_legacy(self, session_id: Optional[str] = None) -> Optional[Account]:
+        """wb_pool_policy 缺失时的老逻辑（最久未用 + 余额最高）。"""
         if session_id and session_id in self.sticky_sessions:
             acc_id = self.sticky_sessions[session_id]
             if acc_id in self.accounts:
                 acc = self.accounts[acc_id]
                 if self._is_available(acc):
                     return acc
-        
-        # 2. 轮换选择可用账号
-        available = [
-            acc for acc in self.accounts.values()
-            if self._is_available(acc) and acc.active
-        ]
-        
+
+        available = [acc for acc in self.accounts.values() if self._is_available(acc) and acc.active]
         if not available:
-            # 所有账号都不可用，返回任意一个（让调用方处理错误）
             return next(iter(self.accounts.values()), None)
-        
-        # 选择最闲的账号
+
         available.sort(key=lambda a: (a.last_used, -a.credits))
         chosen = available[0]
-        
-        # 设置粘性会话
+
         if session_id:
             self.sticky_sessions[session_id] = chosen.id
-            self.session_ttl[session_id] = time.time() + 1800  # 30 分钟 TTL
-        
+            self.session_ttl[session_id] = time.time() + 1800
+
         return chosen
-    
+
+    def pick(self, session_id: Optional[str] = None) -> Optional[Account]:
+        """按 distribution 策略挑账号。
+
+        池里一个可用的都没有时返回 None（调用方回 503 并说明原因），
+        而不是硬塞一个正在熔断/冷却的账号上去 —— 那种请求必然失败，
+        还会把 fail_count 越堆越高、把冷却时间越拖越长。
+        """
+        if wb_pool_policy is None:
+            self.last_pick_policy = "legacy"
+            self.last_pick_reason = "fallback"
+            return self._pick_legacy(session_id)
+
+        state = self._policy_state()
+        selection = wb_pool_policy.select(
+            list(self.accounts.values()),
+            self.distribution,
+            session_id=session_id,
+            state=state,
+            region=self.region or None,
+            credit_floor=self.credit_floor,
+            prefer_expiring=self.prefer_expiring,
+            expiring_soon=self.expiring_soon,
+            idle_weight_per_hour=self.idle_weight_per_hour,
+            idle_weight_max=self.idle_weight_max,
+            current_account_id=self.current_account_id,
+        )
+        self._apply_policy_state(state)
+        self.last_pick_policy = selection.policy
+        self.last_pick_reason = selection.reason
+        return selection.account
+
+    def available_accounts(self) -> List[Account]:
+        """当前真正可用的账号。"""
+        return [acc for acc in self.accounts.values() if self._is_available(acc)]
+
+    def unavailable_summary(self) -> List[Dict[str, Any]]:
+        """不可用账号及原因 —— 503 文案与面板都要它。"""
+        if wb_pool_policy is None:
+            return []
+        return [
+            {"id": acc.id, "name": acc.name, "reason": wb_pool_policy.unavailable_reason(acc)}
+            for acc in self.accounts.values() if not self._is_available(acc)
+        ]
+
     def _is_available(self, acc: Account) -> bool:
         """检查账号是否可用"""
         now = time.time()
@@ -168,39 +316,51 @@ class AccountPool:
             acc.fail_count = 0
     
     def record_failure(self, acc_id: str, is_rate_limit: bool = False):
-        """记录失败请求"""
+        """记录失败请求。
+
+        阈值与冷却时长走 config.json（pool.breaker_threshold / breaker_cooldown、
+        cooldown.soft_rate），不再硬编码。上游是按「行」限流的，一个号被限流
+        不代表其他号不行，所以限流冷却要短而准。
+        """
         if acc_id in self.accounts:
             acc = self.accounts[acc_id]
             acc.request_count += 1
             acc.fail_count += 1
             acc.last_used = time.time()
-            
-            # 熔断器
-            if acc.fail_count >= 3:
-                acc.breaker_until = time.time() + 1800  # 30 分钟熔断
-                log.warning(f"账号 {acc.name} 熔断中，30 分钟后恢复")
-            
-            # 限流冷却
-            if is_rate_limit:
-                acc.cooldown_until = time.time() + 600  # 10 分钟冷却
-    
+
+            if is_rate_limit and self.rate_cooldown > 0:
+                acc.cooldown_until = time.time() + self.rate_cooldown
+                log.warning("账号 %s 被限流，冷却 %.1f 分钟", acc.name, self.rate_cooldown / 60.0)
+
+            if acc.fail_count >= max(1, int(self.breaker_threshold)):
+                acc.breaker_until = time.time() + max(0.0, self.breaker_cooldown)
+                log.warning("账号 %s 连续失败 %d 次，熔断 %.1f 分钟",
+                            acc.name, acc.fail_count, self.breaker_cooldown / 60.0)
+
     def add_account(self, acc: Account):
         """添加账号"""
         self.accounts[acc.id] = acc
-    
+
     def remove_account(self, acc_id: str):
         """移除账号"""
         if acc_id in self.accounts:
             del self.accounts[acc_id]
             if self.current_account_id == acc_id:
                 self.current_account_id = None
-    
+            # 清掉指向它的粘性绑定，否则那些 session 会一直挑不到号
+            if wb_pool_policy is not None:
+                state = self._policy_state()
+                dropped = state.drop_account(acc_id)
+                self._apply_policy_state(state)
+                if dropped:
+                    log.info("已清理 %d 条指向已移除账号的粘性会话", dropped)
+
     def switch_account(self, acc_id: Optional[str] = None) -> Optional[str]:
         """切换当前账号。
 
         - 传入 acc_id：强制切到该账号（若存在）
-        - acc_id=None/空：自动挑下一个最闲+余额最高的可用账号（等价于"换号"）
-        - 切换成功一律清空 sticky_sessions，避免旧粘性把新账号绑死
+        - acc_id=None/空：按当前 distribution 策略挑一个可用账号（等价于"换号"）
+        - 切换成功一律清空粘性与轮换游标，避免旧粘性把新账号绑死
 
         返回：切换后的账号 id（成功），None（池空或指定账号不存在）
         """
@@ -219,19 +379,31 @@ class AccountPool:
                     if self._is_available(a) and a.active
                 ]
             if candidates:
-                # 与 pick() 保持一致：先按 last_used 升序（最久没用），再按 credits 降序（余额最多）
-                candidates.sort(key=lambda a: (a.last_used, -a.credits))
-                target_id = candidates[0].id
+                if wb_pool_policy is not None:
+                    state = self._policy_state()
+                    selection = wb_pool_policy.select(
+                        candidates, self.distribution, state=state,
+                        region=self.region or None, credit_floor=self.credit_floor,
+                        prefer_expiring=self.prefer_expiring, expiring_soon=self.expiring_soon,
+                        idle_weight_per_hour=self.idle_weight_per_hour,
+                        idle_weight_max=self.idle_weight_max,
+                    )
+                    self._apply_policy_state(state)
+                    target_id = selection.account_id or None
+                if not target_id:
+                    candidates.sort(key=lambda a: (a.last_used, -a.credits))
+                    target_id = candidates[0].id
 
         if not target_id:
             return None
 
         self.current_account_id = target_id
-        # 关键：清掉粘性，否则旧 session 会继续被粘到旧账号，切换形同虚设
+        # 关键：清掉粘性与游标，否则旧 session 会继续被粘到旧账号，切换形同虚设
         self.sticky_sessions.clear()
         self.session_ttl.clear()
+        self.cursors.clear()
         return target_id
-    
+
     def get_status(self) -> Dict:
         """获取状态"""
         now = time.time()
@@ -240,6 +412,17 @@ class AccountPool:
             "active": sum(1 for a in self.accounts.values() if a.active),
             "available": sum(1 for a in self.accounts.values() if self._is_available(a)),
             "current": self.current_account_id,
+            "policy": {
+                "distribution": self.distribution,
+                "label": (wb_pool_policy.POLICY_LABELS.get(self.distribution, self.distribution)
+                          if wb_pool_policy is not None else self.distribution),
+                "region": self.region or "merged",
+                "credit_floor": self.credit_floor,
+                "last_pick_policy": self.last_pick_policy,
+                "last_pick_reason": self.last_pick_reason,
+                "sticky_sessions": len(self.sticky_sessions),
+                "cursors": dict(self.cursors),
+            },
             "accounts": [
                 {
                     "id": acc.id,
@@ -253,6 +436,12 @@ class AccountPool:
                     "success": acc.success_count,
                     "failures": acc.fail_count,
                     "last_used": acc.last_used,
+                    # 区域与不可用原因直接算好给面板：面板不该再去猜「为什么这个号不派活」。
+                    "region": _usage_region_of(acc),
+                    "reason": (
+                        wb_pool_policy.unavailable_reason(acc, now)
+                        if (wb_pool_policy is not None and not self._is_available(acc)) else ""
+                    ),
                 }
                 for acc in self.accounts.values()
             ]
@@ -263,6 +452,8 @@ class AccountPool:
         data = {
             "current_account_id": self.current_account_id,
             "sticky_sessions": self.sticky_sessions,
+            "session_ttl": self.session_ttl,
+            "cursors": self.cursors,
             "accounts": [asdict(acc) for acc in self.accounts.values()]
         }
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -279,6 +470,8 @@ class AccountPool:
         
         self.current_account_id = data.get("current_account_id")
         self.sticky_sessions = data.get("sticky_sessions", {})
+        self.session_ttl = data.get("session_ttl", {}) or {}
+        self.cursors = data.get("cursors", {}) or {}
         
         for acc_data in data.get("accounts", []):
             acc = Account(**acc_data)
@@ -319,6 +512,71 @@ def load_config() -> Dict:
     # 确保目录存在
     DATA_DIR.mkdir(exist_ok=True)
     AUTH_DIR.mkdir(exist_ok=True)
+
+    # Token 统计：按配置初始化用量库（模块缺失时静默跳过）
+    if wb_usage is not None:
+        usage_conf = config.get("usage") or {}
+        if usage_conf.get("enabled", True):
+            try:
+                raw_path = str(usage_conf.get("file") or "").strip()
+                usage_path = None
+                if raw_path:
+                    candidate = Path(raw_path)
+                    usage_path = str(candidate if candidate.is_absolute() else (BASE_DIR / candidate))
+                wb_usage.configure(
+                    path=usage_path,
+                    retention_days=usage_conf.get("retention_days", 90),
+                    logger=log,
+                    flush_interval=usage_conf.get("flush_interval_seconds", 5),
+                )
+                log.info("Token 统计已就绪: %s", wb_usage.get_store().path)
+            except Exception as exc:
+                log.warning("Token 统计初始化失败: %s", exc)
+
+    # ===== 模型目录：按配置初始化（模块缺失时 /v1/models 退回内置列表）=====
+    if wb_models is not None:
+        try:
+            models_conf = config.get("models") or {}
+            raw_models_path = str(models_conf.get("file") or "").strip()
+            models_path = None
+            if raw_models_path:
+                candidate = Path(raw_models_path)
+                models_path = str(candidate if candidate.is_absolute() else (BASE_DIR / candidate))
+            wb_models.configure(path=models_path, logger=log)
+            log.info("模型目录已就绪: %s", wb_models.get_prefs().path)
+        except Exception as exc:
+            log.warning("模型目录初始化失败: %s", exc)
+
+    # ===== 账号池分配策略：从 config.json 的 pool / cooldown 节注入 =====
+    pool_conf = config.get("pool") or {}
+    cooldown_conf = config.get("cooldown") or {}
+    if wb_pool_policy is not None:
+        pool.distribution = wb_pool_policy.normalize_policy(pool_conf.get("distribution"))
+    else:
+        pool.distribution = str(pool_conf.get("distribution") or "priority")
+    pool.region = str(pool_conf.get("region") or "")
+    try:
+        pool.credit_floor = float(pool_conf.get("credit_floor") or 0)
+    except (TypeError, ValueError):
+        pool.credit_floor = 0.0
+    pool.prefer_expiring = bool(pool_conf.get("prefer_expiring", False))
+    pool.expiring_soon = _duration_seconds(pool_conf.get("expiring_soon"), 0.0)
+    try:
+        pool.idle_weight_per_hour = float(pool_conf.get("idle_weight_per_hour") or 0.5)
+    except (TypeError, ValueError):
+        pool.idle_weight_per_hour = 0.5
+    try:
+        pool.idle_weight_max = float(pool_conf.get("idle_weight_max") or 5.0)
+    except (TypeError, ValueError):
+        pool.idle_weight_max = 5.0
+    try:
+        pool.breaker_threshold = int(pool_conf.get("breaker_threshold") or 3)
+    except (TypeError, ValueError):
+        pool.breaker_threshold = 3
+    pool.breaker_cooldown = _duration_seconds(pool_conf.get("breaker_cooldown"), 1800.0)
+    pool.rate_cooldown = _duration_seconds(cooldown_conf.get("soft_rate"), 600.0)
+    log.info("账号池策略: %s 区域=%s 积分下限=%.0f",
+             pool.distribution, pool.region or "merged", pool.credit_floor)
     
     return config
 
@@ -327,6 +585,159 @@ def save_config():
     """保存配置"""
     with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
         json.dump(config, f, ensure_ascii=False, indent=2)
+
+
+# ===== Token 统计辅助 =====
+
+def _usage_region_of(account: Any) -> str:
+    """按凭据域名判断区域：workbuddy.ai 是国际版，其余（copilot.tencent.com 等）是国内版。"""
+    domain = str(getattr(account, "domain", "") or "").lower()
+    return "global" if "workbuddy.ai" in domain else "cn"
+
+
+def record_chat_usage(account, request_data, usage, success, duration_ms, headers, model_hint="") -> None:
+    """把一次对话请求的用量落进 wb_usage。
+
+    统计属于旁路：这里任何异常都不允许影响正常的转发/回包流程。
+    """
+    if wb_usage is None:
+        return
+    try:
+        user_agent = ""
+        try:
+            user_agent = headers.get("User-Agent", "") if headers is not None else ""
+        except Exception:
+            user_agent = ""
+        model = str(model_hint or "").strip()
+        if not model:
+            model = str((request_data or {}).get("model") or "").strip()
+        wb_usage.record_request(
+            account_id=getattr(account, "id", "") or "",
+            region=_usage_region_of(account),
+            client=wb_usage.detect_client(user_agent, headers),
+            model=model or "unknown",
+            usage=usage,
+            success=bool(success),
+            duration_ms=int(duration_ms or 0),
+            user_agent=user_agent,
+        )
+    except Exception as exc:
+        log.warning("Token 用量落账失败: %s", exc)
+
+
+# ===== 模型目录接入 =====
+
+def _duration_seconds(value: Any, default: float = 0.0) -> float:
+    """把 '168h' / '30m' / 600 这类写法变成秒。"""
+    if value is None or value == "":
+        return float(default)
+    if isinstance(value, (int, float)):
+        return float(value)
+    if wb_usage is not None:
+        try:
+            return float(wb_usage.parse_duration(value, default))
+        except Exception:
+            pass
+    text = str(value).strip().lower()
+    try:
+        for suffix, factor in (("ms", 0.001), ("s", 1.0), ("m", 60.0), ("h", 3600.0), ("d", 86400.0)):
+            if text.endswith(suffix):
+                return float(text[: -len(suffix)]) * factor
+        return float(text)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def resolve_model(requested: str, region: Optional[str] = None) -> Dict[str, Any]:
+    """决定这次请求实际用哪个模型。
+
+    目录模块缺失时退回老逻辑：只认 REAL_MODELS，其余换成兜底模型。
+    替换原因会一路传到日志与面板，避免「明明请求了 GLM-5.3 却用了 flash」这种事
+    悄悄发生却没人知道。
+    """
+    if wb_models is None:
+        want = str(requested or "").strip()
+        if want in REAL_MODELS:
+            return {"model": want, "requested": want, "replaced": False, "reason": "", "spec": None}
+        return {"model": DEFAULT_CHAT_MODEL, "requested": want, "replaced": bool(want),
+                "reason": "unknown" if want else "empty", "spec": None}
+    return wb_models.resolve_requested(requested, region or (pool.region or None))
+
+
+def build_model_list(region: Optional[str] = None) -> List[Dict[str, Any]]:
+    """把模型目录转成 OpenAI /v1/models 形状。
+
+    内置目录里未知的字段（上下文窗口、输出上限）不会出现在响应里 ——
+    宁可缺字段，也不给客户端一个看着可信但其实是猜的数字。
+    """
+    created = 1687882411
+    target = region if region is not None else (pool.region or "")
+    if wb_models is None:
+        return [{"id": m, "object": "model", "created": created, "owned_by": "workbuddy"}
+                for m in REAL_MODELS]
+
+    out: List[Dict[str, Any]] = []
+    for spec in wb_models.catalog(target or None, enabled_only=True):
+        entry: Dict[str, Any] = {
+            "id": spec.id,
+            "object": "model",
+            "created": created,
+            "owned_by": "workbuddy",
+        }
+        if spec.context_window:
+            entry["context_window"] = spec.context_window
+        if spec.max_tokens:
+            entry["max_tokens"] = spec.max_tokens
+
+        meta: Dict[str, Any] = {
+            "name": spec.name or spec.id,
+            "regions": list(spec.regions),
+            "supports_image": spec.supports_image,
+            "reasoning_efforts": list(spec.reasoning_efforts),
+            "rate": spec.rate,
+        }
+        if spec.twins:
+            meta["twins"] = dict(spec.twins)
+        try:
+            badges = wb_models.get_prefs().promotions_for(spec.id, active_only=True)
+        except Exception:
+            badges = []
+        if badges:
+            meta["badges"] = [b.label for b in badges]
+        entry["workbuddy_meta"] = meta
+        out.append(entry)
+    return out
+
+
+def build_pool_view(limit: int = 8) -> Dict[str, Any]:
+    """池健康视图：策略、排序、下一个轮到谁、每个号为什么不可用。"""
+    view: Dict[str, Any] = {
+        "policy": {
+            "distribution": pool.distribution,
+            "region": pool.region or "merged",
+            "credit_floor": pool.credit_floor,
+            "last_pick_policy": pool.last_pick_policy,
+            "last_pick_reason": pool.last_pick_reason,
+            "sticky_sessions": len(pool.sticky_sessions),
+            "cursors": dict(pool.cursors),
+        },
+        "status": pool.get_status(),
+        "unavailable": pool.unavailable_summary(),
+    }
+    if wb_pool_policy is None:
+        view["policies"] = []
+        view["preview"] = None
+        view["note"] = "分配策略模块不可用，账号池退回老式轮换"
+        return view
+    state = pool._policy_state()
+    view["policies"] = wb_pool_policy.describe(pool.distribution)
+    view["preview"] = wb_pool_policy.preview(
+        list(pool.accounts.values()), pool.distribution,
+        state=state, region=pool.region or None, credit_floor=pool.credit_floor,
+        idle_weight_per_hour=pool.idle_weight_per_hour,
+        idle_weight_max=pool.idle_weight_max, limit=limit,
+    )
+    return view
 
 
 # ===== 任务引擎辅助 =====
@@ -338,6 +749,10 @@ def get_tasks_module():
         try:
             import wb_tasks as _wb_tasks
         except Exception as e:
+            # 记下真实原因：面板/接口报「任务引擎不可用」时要能说清为什么。
+            global log_tasks_import_err
+            log_tasks_import_err = str(e)
+            log.warning("wb_tasks 导入失败，任务引擎不可用: %s", e)
             return None
         wb_tasks = _wb_tasks
         log.info(f"任务引擎已加载: {wb_tasks.__file__}")
@@ -405,11 +820,6 @@ def handle_task_action(action: str, request_data: Dict[str, Any]):
     if action == "keepalive":
         return m.run_keepalive_all(accounts, dry_run=dry_run)
     return {"ok": False, "error": f"未知动作: {action}", "status": 400}
-
-
-def log_tasks_import_err() -> str:
-    """保留导入错误的访问入口。"""
-    return log_tasks_import_err or ""
 
 
 def get_auth_module():
@@ -662,22 +1072,32 @@ def live_credits_force_refresh() -> Dict[str, Any]:
 
 
 
-def chat_upstream_url() -> str:
-    """聊天补全的真实上游地址。
+def chat_base_for(account: "Account" = None) -> str:
+    """按账号区域取上游 base。
 
-    优先级：upstream.base_url > global.chat_base > CHAT_BASE 常量。
-    旧版默认值是 https://api.workbuddy.cn/v1，这个域名并不存在，请求会直接
-    getaddrinfo failed（网关 /v1/chat/completions 恒 500 的根因）。
-    上游 cn 域真实路径是 /v2/chat/completions。
+    配置里显式写了 upstream.base_url / global.chat_base 时以配置为准（自建反代）；
+    没写时按凭据区域自动分流：
+      国际版（domain 含 workbuddy.ai）→ https://www.workbuddy.ai
+      其它（copilot.tencent.com / codebuddy.cn）→ https://copilot.tencent.com
+    旧版一律用国内域名，于是国际版账号必然 401。
     """
     base = (
         str(config.get("upstream", {}).get("base_url") or "").strip()
         or str(config.get("global", {}).get("chat_base") or "").strip()
-        or CHAT_BASE
     ).rstrip("/")
+    if not base:
+        if account is not None and _usage_region_of(account) == "global":
+            return GLOBAL_CHAT_BASE
+        return CHAT_BASE
     # 历史版本把默认值写成了不存在的 api.workbuddy.cn，老 config.json 里可能还留着
     if "api.workbuddy.cn" in base:
-        base = CHAT_BASE
+        return CHAT_BASE
+    return base
+
+
+def chat_upstream_url(account: "Account" = None) -> str:
+    """聊天补全的真实上游地址（按账号区域取 base，再补 /v2/chat/completions）。"""
+    base = chat_base_for(account)
     if base.endswith("/chat/completions") or base.endswith("/v2/chat/completions"):
         return base
     if base.endswith("/v1"):
@@ -752,13 +1172,14 @@ def aggregate_sse_completion(resp, model: str) -> str:
 
 def chat_upstream_headers(account: "Account", stream: bool = False) -> Dict[str, str]:
     """构造与上游一致的聊天请求头（缺 X-User-Id/X-Domain 会被上游拒绝）。"""
+    origin = GLOBAL_ORIGIN if _usage_region_of(account) == "global" else CHAT_BASE
     h = {
         "Content-Type": "application/json",
         "Accept": "text/event-stream" if stream else "application/json",
         "Authorization": "Bearer " + account.token,
         "User-Agent": "CLI/2.63.2 CodeBuddy/2.63.2",
-        "Origin": CHAT_BASE,
-        "Referer": CHAT_BASE + "/",
+        "Origin": origin,
+        "Referer": origin + "/",
         "X-User-Id": account.id,
     }
     if account.domain:
@@ -1091,17 +1512,20 @@ class GatewayHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(payload.encode("utf-8"))
         
-        elif self.path == "/v1/models":
+        elif self.path.startswith("/v1/models"):
             if not self._check_auth():
                 self._send_error("Unauthorized", 401, "authentication_error")
                 return
 
-            # 只列上游真实可用的模型（旧版列的是 gpt-4o 等假名字，上游会直接 400）
-            created = 1687882411
-            models = [{"id": m, "object": "model", "created": created, "owned_by": "workbuddy"}
-                      for m in REAL_MODELS]
-            self._send_json({"data": models, "object": "list"})
-        
+            # 走模型目录：带上下文窗口 / 图片能力 / 推理档位 / 倍率，并遵守模型开关。
+            # 目录模块缺失时 build_model_list 退回旧的 REAL_MODELS 裸列表。
+            parsed_models = urlparse(self.path)
+            query_models = parse_qs(parsed_models.query)
+            region_q = (query_models.get("region") or [""])[0].strip().lower() or None
+            if region_q in ("merged", "all", "any"):
+                region_q = ""
+            self._send_json({"data": build_model_list(region_q), "object": "list"})
+
         elif self.path in ("/api/pool", "/v1/pool"):
             if not self._check_auth():
                 self._send_error("Unauthorized", 401, "authentication_error")
@@ -1118,8 +1542,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if not self._check_auth():
                 self._send_error("Unauthorized", 401, "authentication_error")
                 return
-            import urllib.parse
-            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            qs = parse_qs(urlparse(self.path).query)
             realm = qs.get("realm", ["cn"])[0]
             m = get_auth_module()
             if m is None:
@@ -1132,8 +1555,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if not self._check_auth():
                 self._send_error("Unauthorized", 401, "authentication_error")
                 return
-            import urllib.parse
-            qs = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            qs = parse_qs(urlparse(self.path).query)
             state = qs.get("state", [""])[0]
             m = get_auth_module()
             if m is None:
@@ -1177,7 +1599,6 @@ class GatewayHandler(BaseHTTPRequestHandler):
             if not self._check_auth():
                 self._send_error("Unauthorized", 401, "authentication_error")
                 return
-            from urllib.parse import urlparse, parse_qs
             qs = parse_qs(urlparse(self.path).query)
             force = "1" in qs.get("refresh", [])
             try:
@@ -1244,6 +1665,48 @@ class GatewayHandler(BaseHTTPRequestHandler):
         else:
             self._send_error("No available account", 409)
 
+    def _handle_logs_api(self):
+        """采集日志 + 采集进程状态（原老控制台「📈 实时面板」的数据源）。"""
+        if wb_ops is None:
+            self._send_json({
+                "log": [],
+                "collect": {"running": False, "unavailable": f"wb_ops 不可用: {log_ops_import_err}"},
+            })
+            return
+        n = 200
+        try:
+            qs = parse_qs(urlparse(self.path).query)
+            n = max(1, min(2000, int((qs.get("n") or ["200"])[0])))
+        except (ValueError, TypeError):
+            n = 200
+        self._send_json({"log": wb_ops.get_collect_log(n), "collect": wb_ops.get_collect_status()})
+
+    def _handle_collect_api(self, request_data: Optional[Dict[str, Any]] = None):
+        """积分采集进程：GET=看状态，POST collect/start=启动，POST collect/stop=停止。"""
+        if wb_ops is None:
+            self._send_error(f"wb_ops 不可用: {log_ops_import_err}", 503)
+            return
+        request_data = request_data or {}
+        path = urlparse(self.path).path.rstrip("/")
+        if self.command == "GET" or path.endswith("collect/status"):
+            self._send_json(wb_ops.get_collect_status())
+            return
+        if self.command != "POST":
+            self._send_error("Method Not Allowed", 405)
+            return
+        if path.endswith("collect/stop"):
+            self._send_json(wb_ops.stop_collect())
+            return
+        action = str(request_data.get("action") or "collect")
+        self._send_json(wb_ops.start_collect(action))
+
+    def _handle_diagnose_api(self):
+        """系统自检四项：python / gateway / deps / files（原老控制台「🔧 诊断」页签）。"""
+        if wb_ops is None:
+            self._send_error(f"wb_ops 不可用: {log_ops_import_err}", 503)
+            return
+        self._send_json(wb_ops.run_checks())
+
     def _handle_tasks_api(self):
         """成长任务中心 & 保活 API。"""
         if not self._check_auth():
@@ -1272,33 +1735,85 @@ class GatewayHandler(BaseHTTPRequestHandler):
         else:
             self._send_json(result, status)
 
+    def _pick_chat_account(self, session_id: str, skip=None):
+        """给聊天请求挑账号：优先「当前账号」，不可用才走池策略；skip 里的跳过。
+
+        skip 是本次请求已经试过的账号（401 换号用），避免同一个坏 token 连试三次。
+        """
+        exclude = set(skip or ())
+        current_id = pool.current_account_id
+        if current_id and current_id in pool.accounts and current_id not in exclude:
+            candidate = pool.accounts[current_id]
+            if pool._is_available(candidate) and candidate.token:
+                return candidate
+        picked = pool.pick(session_id)
+        if picked is not None and picked.id not in exclude and picked.token:
+            return picked
+        # 策略有可能又挑了已经试过的号（priority 会让当前号一直排第一）→ 兜底扫一遍池子
+        rest = [
+            acc for acc in pool.accounts.values()
+            if acc.id not in exclude and pool._is_available(acc) and acc.token
+        ]
+        if not rest:
+            return None
+        if wb_pool_policy is not None:
+            try:
+                ordered = wb_pool_policy.order_priority(rest)
+                if ordered:
+                    return ordered[0]
+            except Exception as exc:
+                log.warning("兜底选号失败，改用最久未用优先: %s", exc)
+        rest.sort(key=lambda a: (-a.last_used, -a.credits, a.id))
+        return rest[0]
+
+    def _send_account_headers(self, account, model_name: str = "") -> None:
+        """把「这一次用的是哪个账号」写进响应头，方便在 DSH / curl 侧核对。
+
+        http.server 只按 latin-1 编码响应头，中文昵称必须先 quote 成 ASCII。
+        """
+        self.send_header("X-WorkBuddy-Account-Id", account.id)
+        name = getattr(account, "name", "") or ""
+        self.send_header("X-WorkBuddy-Account", quote(name) if name else account.id[:8])
+        self.send_header("X-WorkBuddy-Region", _usage_region_of(account))
+        if model_name:
+            self.send_header("X-WorkBuddy-Model", str(model_name))
+        self.send_header(
+            "Access-Control-Expose-Headers",
+            "X-WorkBuddy-Account,X-WorkBuddy-Account-Id,X-WorkBuddy-Region,X-WorkBuddy-Model",
+        )
+
     def _handle_chat_completions(self):
-        """处理聊天补全请求"""
+        """处理聊天补全请求。
+
+        账号失败自动换号：某个账号 token 过期 / 区域不对（上游 401/403）时只让该账号
+        冷却，再拿池子里的下一个号重试 —— 一个坏号不该把整个 DSH 请求打成失败。
+        """
         # 读取请求体
         content_length = int(self.headers.get("Content-Length", 0))
         body = self.rfile.read(content_length).decode('utf-8')
-        
+
         try:
             request_data = json.loads(body)
         except json.JSONDecodeError:
             self._send_error("Invalid JSON", 400)
             return
-        
-        # 选择账号：优先使用 WebUI 切换后的当前账号
+
         session_id = request_data.get("user", str(uuid.uuid4()))
-        if pool.current_account_id and pool.current_account_id in pool.accounts:
-            account = pool.accounts[pool.current_account_id]
-        else:
-            account = pool.pick(session_id)
-        
-        if not account or not account.token:
-            self._send_error("No available accounts", 503)
-            return
-        
-        # 转发到上游（cn 域真实路径是 /v2/chat/completions，旧版拼到了不存在的域名）
-        upstream_url = chat_upstream_url()
         stream = bool(request_data.get("stream"))
-        headers_sent = False
+
+        # 池子里一个能用的号都没有 → 直接 503，并把每个号为什么不能用说清楚
+        if not pool.accounts or not any(
+            a.token and pool._is_available(a) for a in pool.accounts.values()
+        ):
+            stuck = pool.unavailable_summary()
+            if stuck:
+                detail = "；".join(
+                    "%s(%s)" % ((x["name"] or x["id"][:8]), x["reason"]) for x in stuck[:4]
+                )
+            else:
+                detail = "账号池为空"
+            self._send_error("No available accounts: %s" % detail, 503)
+            return
 
         # 上游只接受流式请求（非流式实测直接 400 code=11101），所以对上游永远发
         # stream=true；客户端要非流式时用 aggregate_sse_completion 把 SSE 聚合成
@@ -1306,74 +1821,450 @@ class GatewayHandler(BaseHTTPRequestHandler):
         up_body = dict(request_data)
         up_body["stream"] = True
 
-        # 模型名兜底：客户端写死的 gpt-4o / deepseek-chat 等上游不认，替换成真实模型。
+        # 模型名兜底：走模型目录（未知 / 被隐藏 / 跨区 一律换成兜底模型）。
         want_model = str(request_data.get("model") or "").strip()
-        if want_model in REAL_MODELS:
-            up_body["model"] = want_model
-        else:
-            up_body["model"] = DEFAULT_CHAT_MODEL
-            if want_model:
-                log.info("模型 %s 上游不支持，改用 %s", want_model, DEFAULT_CHAT_MODEL)
+        resolved = resolve_model(want_model, pool.region or None)
+        up_body["model"] = resolved["model"]
+        if resolved.get("replaced"):
+            log.info("模型 %s -> %s（%s）",
+                     want_model or "(空)", resolved["model"], resolved.get("reason") or "-")
+
+        tried: List[str] = []
+        antiprobe_hits: Dict[str, int] = {}
+        last_error = ""
+        # 预算 = 换号次数 + 反探测原地重发次数，避免重发把换号额度吃光
+        for _attempt in range(MAX_ACCOUNT_TRIES + ANTIPROBE_MAX_RETRIES):
+            account = self._pick_chat_account(session_id, tried)
+            if not account or not account.token:
+                last_error = last_error or "没有更多可用账号"
+                break
+            tried.append(account.id)
+            # 上游地址按账号区域分流：国际版 token 打到国内域名会被 openresty 回 401
+            upstream_url = chat_upstream_url(account)
+
+            # ===== Token 统计：起始时间与聚合占位 =====
+            usage_started = time.time()
+            stream_tap = None
+            aggregated_usage = None
+            aggregated_model = ""
+            headers_sent = False
+
+            try:
+                req = Request(
+                    upstream_url,
+                    data=json.dumps(up_body, ensure_ascii=False).encode('utf-8'),
+                    headers=chat_upstream_headers(account, stream=True),
+                    method="POST"
+                )
+
+                timeout = config.get("upstream", {}).get("timeout_seconds", 120)
+                with urlopen(req, timeout=timeout) as resp:
+                    if stream:
+                        # SSE 透传：边收边发，否则客户端等不到首包会超时
+                        self.send_response(200)
+                        self.send_header("Content-Type", "text/event-stream")
+                        self.send_header("Cache-Control", "no-cache")
+                        self.send_header("Connection", "close")
+                        self._send_account_headers(account, up_body.get("model", ""))
+                        self.end_headers()
+                        headers_sent = True
+                        if wb_usage is not None:
+                            stream_tap = wb_usage.StreamUsageTap()
+                        while True:
+                            chunk = resp.read(1024)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                            self.wfile.flush()
+                            # 边透传边抓 usage：上游把 usage 放在最后一个 chunk
+                            if stream_tap is not None:
+                                stream_tap.feed(chunk)
+                        if stream_tap is not None:
+                            stream_tap.finish()
+                    else:
+                        response_data = aggregate_sse_completion(resp, request_data.get("model") or "")
+                        try:
+                            _parsed = json.loads(response_data)
+                            if isinstance(_parsed, dict):
+                                aggregated_usage = _parsed.get("usage")
+                                aggregated_model = str(_parsed.get("model") or "")
+                        except Exception:
+                            aggregated_usage = None
+                        self.send_response(200)
+                        self.send_header("Content-Type", "application/json")
+                        self._send_account_headers(account, up_body.get("model", ""))
+                        self.end_headers()
+                        headers_sent = True
+                        self.wfile.write(response_data.encode('utf-8'))
+                    pool.record_success(account.id)
+
+                    # ===== Token 统计：成功请求落账 =====
+                    if stream_tap is not None:
+                        record_chat_usage(
+                            account, request_data, stream_tap.usage, True,
+                            (time.time() - usage_started) * 1000.0, self.headers,
+                            model_hint=stream_tap.model or up_body.get("model", ""),
+                        )
+                    else:
+                        record_chat_usage(
+                            account, request_data, aggregated_usage, True,
+                            (time.time() - usage_started) * 1000.0, self.headers,
+                            model_hint=aggregated_model or up_body.get("model", ""),
+                        )
+
+                    return
+            except HTTPError as e:
+                error_body = e.read().decode('utf-8') if e.fp else ""
+                is_auth_error = e.code in (401, 403)
+                # 上游把具体原因放在 body 的 code 里（如 11128 反探测 / 11101 非流式），
+                # 只回 HTTP 状态码会丢掉全部诊断信息。
+                upstream_code = None
+                try:
+                    _ub = json.loads(error_body)
+                    if isinstance(_ub, dict):
+                        upstream_code = _ub.get("code")
+                except Exception:
+                    upstream_code = None
+                is_antiprobe = e.code == 400 and (
+                    upstream_code == 11128
+                    or "request illegal" in error_body.lower()
+                    or "请求被拦截" in error_body
+                )
+                log.error("上游返回错误 %s（账号 %s / %s）: %s",
+                          e.code, account.name or account.id[:8], account.id[:8],
+                          error_body[:200])
+
+                # 记录失败（429 走限流冷却，其它累加熔断计数）
+                pool.record_failure(account.id, e.code == 429)
+
+                # Token 统计：失败也计次，面板才能算成功率
+                record_chat_usage(
+                    account, request_data, None, False,
+                    (time.time() - usage_started) * 1000.0, self.headers,
+                    model_hint=up_body.get("model", ""),
+                )
+
+                if is_antiprobe and not headers_sent:
+                    hits = antiprobe_hits.get(account.id, 0)
+                    antiprobe_hits[account.id] = hits + 1
+                    last_error = "账号 %s 被上游反探测拦截(code=%s)" % (
+                        account.name or account.id[:8], upstream_code or e.code)
+                    if hits < ANTIPROBE_MAX_RETRIES:
+                        log.warning("账号 %s 被上游拦截(code=%s)，%.1fs 后原地重发（第 %d/%d 次）",
+                                    account.id[:8], upstream_code or e.code,
+                                    ANTIPROBE_RETRY_DELAY, hits + 1, ANTIPROBE_MAX_RETRIES)
+                        tried.pop()  # 原地重发不算这个号已试过
+                        time.sleep(ANTIPROBE_RETRY_DELAY)
+                        continue
+                    log.warning("账号 %s 连续被上游拦截(code=%s)，冷却 %.0fs 后换号",
+                                account.id[:8], upstream_code or e.code, ANTIPROBE_FAIL_COOLDOWN)
+                    account.cooldown_until = time.time() + ANTIPROBE_FAIL_COOLDOWN
+                    continue
+
+                if is_auth_error:
+                    # 401/403 = 上游不认这把凭据（过期 / 区域不对 / 换端）。让它单独
+                    # 冷却一段时间，然后换下一个账号重试。
+                    account.cooldown_until = time.time() + AUTH_FAIL_COOLDOWN
+                    last_error = "账号 %s 鉴权失败(%s)" % (account.name or account.id[:8], e.code)
+                    if not headers_sent and len(tried) < MAX_ACCOUNT_TRIES:
+                        log.warning("账号 %s 鉴权失败，冷却 %.0f 秒后换号重试",
+                                    account.id[:8], AUTH_FAIL_COOLDOWN)
+                        continue
+
+                if headers_sent:
+                    log.warning("响应头已发出，无法再回传上游错误")
+                    return
+                self._send_json({
+                    "error": {
+                        "message": f"Upstream error: {e.code}",
+                        "type": "api_error",
+                        "code": e.code
+                    }
+                }, e.code)
+                return
+            except Exception as e:
+                log.error(f"请求失败: {e}")
+                pool.record_failure(account.id)
+                record_chat_usage(
+                    account, request_data, None, False,
+                    (time.time() - usage_started) * 1000.0, self.headers,
+                    model_hint=up_body.get("model", ""),
+                )
+                if headers_sent:
+                    return
+                self._send_error(f"Request failed: {str(e)}", 500)
+                return
+
+        # 池子里的号都试过了还是不行
+        self._send_error(
+            "No usable account after %d attempt(s): %s" % (len(tried), last_error or "全部失败"),
+            503,
+        )
+
+    def _handle_usage_api(self):
+        """Token 统计接口：/panel/api/usage 取聚合，/panel/api/usage/meta 取筛选项。"""
+        if wb_usage is None:
+            self._send_error("Token 统计模块不可用: %s" % (log_usage_import_err,), 501)
+            return
+
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+
+        def _one(name, default=""):
+            values = query.get(name) or []
+            return str(values[0]).strip() if values else default
+
+        if parsed.path.rstrip("/").endswith("/usage/meta"):
+            store = wb_usage.get_store()
+            self._send_json({
+                "ranges": [
+                    {"key": key, "label": wb_usage.RANGE_LABELS.get(key, key)}
+                    for key in wb_usage.RANGE_KEYS
+                ],
+                "regions": [
+                    {"key": "merged", "label": "合并"},
+                    {"key": "cn", "label": "国内版"},
+                    {"key": "global", "label": "国际版"},
+                ],
+                "clients": [
+                    {"key": key, "label": wb_usage.CLIENT_LABELS.get(key, key)}
+                    for key in wb_usage.CLIENT_ORDER
+                ],
+                "store": store.stats(),
+                "top_user_agents": store.top_user_agents(12),
+                "note": (
+                    "只统计经本网关转发的请求；客户端维度按调用来源的 "
+                    "User-Agent / Header 归类，不代表上游账号的全量用量。"
+                ),
+            })
+            return
+
+        summary = wb_usage.summary(
+            range_key=_one("range", "today") or "today",
+            region=_one("region", "merged") or "merged",
+            client=_one("client") or None,
+            model=_one("model") or None,
+        )
+        # 「用的是哪个账号的积分」：by_account 原本只有 uuid，面板上没法认人。
+        # 这里把账号昵称补进去（id → name），面板直接显示昵称。
+        try:
+            names = {acc.id: (acc.name or acc.id) for acc in pool.accounts.values()}
+            for row in summary.get("by_account") or []:
+                key = str(row.get("key") or "")
+                if key in names:
+                    row["name"] = names[key]
+                    row["label"] = names[key]
+        except Exception as exc:
+            log.warning("账号昵称回填失败: %s", exc)
+        self._send_json(summary)
+
+    def _handle_models_api(self):
+        """模型目录接口：/panel/api/models。
+
+        GET  → 目录快照（含每个字段来自 builtin / upstream / override）
+        POST → {action: toggle|set|bulk|override|clear_overrides|merge|promotions|prune_promotions}
+        """
+        if wb_models is None:
+            self._send_error("模型目录模块不可用: %s" % (log_models_import_err,), 501)
+            return
+
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        region = (query.get("region") or [""])[0].strip().lower() or None
+        if region in ("merged", "all", "any"):
+            region = None
+
+        content_length = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(content_length).decode("utf-8") if content_length else ""
+        payload: Dict[str, Any] = {}
+        if body:
+            try:
+                payload = json.loads(body) or {}
+            except json.JSONDecodeError:
+                self._send_error("Invalid JSON", 400)
+                return
+
+        action = str(payload.get("action") or ("snapshot" if not body else "set")).strip().lower()
+        prefs = wb_models.get_prefs()
+        note = ""
+        try:
+            if action == "toggle":
+                enabled = prefs.toggle(payload.get("model"), payload.get("region") or region)
+                note = "已%s %s" % ("启用" if enabled else "隐藏", payload.get("model"))
+            elif action in ("set", "bulk"):
+                models = payload.get("models") or ([payload.get("model")] if payload.get("model") else [])
+                changed = prefs.bulk_set([m for m in models if m],
+                                         bool(payload.get("enabled", True)),
+                                         payload.get("region") or region)
+                note = "改了 %d 个模型的可见性" % changed
+            elif action == "override":
+                ok = prefs.set_override(payload.get("model"), **(payload.get("fields") or {}))
+                note = "已写入人工覆盖" if ok else "没有可写入的字段"
+            elif action == "clear_overrides":
+                prefs.clear_overrides(payload.get("model") or None)
+                note = "已清空覆盖"
+            elif action == "merge":
+                count = prefs.merge_discovered(payload.get("entries") or [],
+                                               region=payload.get("region") or region)
+                note = "已并入 %d 个模型的发现结果" % count
+            elif action == "promotions":
+                count = prefs.set_promotions(payload.get("promotions") or [])
+                note = "已写入 %d 条促销" % count
+            elif action == "prune_promotions":
+                note = "已清理 %d 条过期促销" % prefs.prune_promotions()
+            elif action != "snapshot":
+                self._send_error("未知操作: %s" % action, 400)
+                return
+        except Exception as exc:
+            self._send_error("模型目录操作失败: %s" % exc, 400)
+            return
+
+        snapshot = prefs.snapshot(region)
+        snapshot["note"] = note
+        self._send_json(snapshot)
+
+    def _handle_pool_api(self):
+        """账号池分配策略接口：/panel/api/pool。
+
+        GET  → 策略 + 池状态 + 排序预览 + 每个不可用账号的原因
+        POST → {distribution: priority|round-robin|balanced|sticky} 切换策略并落盘 config.json
+        """
+        parsed = urlparse(self.path)
+        query = parse_qs(parsed.query)
+        content_length = int(self.headers.get("Content-Length", 0) or 0)
+        body = self.rfile.read(content_length).decode("utf-8") if content_length else ""
+        payload: Dict[str, Any] = {}
+        if body:
+            try:
+                payload = json.loads(body) or {}
+            except json.JSONDecodeError:
+                self._send_error("Invalid JSON", 400)
+                return
+
+        if payload.get("distribution"):
+            if wb_pool_policy is None:
+                self._send_error("分配策略模块不可用: %s" % (log_policy_import_err,), 501)
+                return
+            new_policy = wb_pool_policy.normalize_policy(payload["distribution"])
+            pool.distribution = new_policy
+            pool_config = config.setdefault("pool", {})
+            pool_config["distribution"] = new_policy
+            save_config()
+            log.info("账号池分配策略已切到 %s", wb_pool_policy.POLICY_LABELS.get(new_policy, new_policy))
 
         try:
-            req = Request(
-                upstream_url,
-                data=json.dumps(up_body, ensure_ascii=False).encode('utf-8'),
-                headers=chat_upstream_headers(account, stream=True),
-                method="POST"
-            )
+            limit = int((query.get("limit") or ["8"])[0])
+        except (TypeError, ValueError):
+            limit = 8
+        limit = max(1, min(50, limit))
+        self._send_json(build_pool_view(limit))
 
-            timeout = config.get("upstream", {}).get("timeout_seconds", 120)
-            with urlopen(req, timeout=timeout) as resp:
-                if stream:
-                    # SSE 透传：边收边发，否则客户端等不到首包会超时
-                    self.send_response(200)
-                    self.send_header("Content-Type", "text/event-stream")
-                    self.send_header("Cache-Control", "no-cache")
-                    self.send_header("Connection", "close")
-                    self.end_headers()
-                    headers_sent = True
-                    while True:
-                        chunk = resp.read(1024)
-                        if not chunk:
-                            break
-                        self.wfile.write(chunk)
-                        self.wfile.flush()
-                else:
-                    response_data = aggregate_sse_completion(resp, request_data.get("model") or "")
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json")
-                    self.end_headers()
-                    headers_sent = True
-                    self.wfile.write(response_data.encode('utf-8'))
-                pool.record_success(account.id)
+    def _handle_checkin_api(self):
+        """签到 / Catch-up 补签 / 收益账本。GET 读报告，POST action=run|state 执行签到。"""
+        if wb_checkin is None:
+            self._send_error("签到模块不可用: %s" % log_checkin_import_err, 501)
+            return
 
-        except HTTPError as e:
-            error_body = e.read().decode('utf-8') if e.fp else ""
-            log.error(f"上游返回错误 {e.code}: {error_body[:200]}")
+        request_data: Dict[str, Any] = {}
+        content_length = int(self.headers.get("Content-Length") or 0)
+        if content_length > 0:
+            raw_body = self.rfile.read(content_length).decode("utf-8", "replace")
+            try:
+                parsed_body = json.loads(raw_body) if raw_body.strip() else {}
+            except json.JSONDecodeError:
+                parsed_body = {}
+            if isinstance(parsed_body, dict):
+                request_data = parsed_body
 
-            # 记录失败
-            is_rate_limit = e.code == 429
-            pool.record_failure(account.id, is_rate_limit)
+        try:
+            days = int(request_data.get("days") or 7)
+        except (TypeError, ValueError):
+            days = 7
+        days = max(1, min(90, days))
+        try:
+            limit = int(request_data.get("limit") or 300)
+        except (TypeError, ValueError):
+            limit = 300
+        limit = max(1, min(5000, limit))
+        uid = request_data.get("uid") or request_data.get("account_id")
+        day = request_data.get("day")
 
-            if headers_sent:
-                log.warning("响应头已发出，无法再回传上游错误")
-                return
+        if self.command != "POST":
+            body = wb_checkin.report(days=days, limit=limit, uid=uid, day=day)
+            body["account_rows"] = wb_checkin.account_state_rows(get_task_account_list())
+            body["state_file"] = str(wb_checkin.CHECKIN_STATE_FILE)
+            self._send_json(body)
+            return
+
+        action = str(request_data.get("action") or "run")
+        if action == "state":
             self._send_json({
-                "error": {
-                    "message": f"Upstream error: {e.code}",
-                    "type": "api_error",
-                    "code": e.code
-                }
-            }, e.code)
+                "ok": True,
+                "today": wb_checkin.utc8_date(),
+                "account_rows": wb_checkin.account_state_rows(get_task_account_list()),
+                "state": wb_checkin.load_state(),
+            })
+            return
 
-        except Exception as e:
-            log.error(f"请求失败: {e}")
-            pool.record_failure(account.id)
-            if headers_sent:
-                return
-            self._send_error(f"Request failed: {str(e)}", 500)
-    
+        accounts = get_task_account_list()
+        if uid:
+            accounts = [a for a in accounts if str(a.get("uid")) == str(uid) or a.get("name") == uid]
+        if not accounts:
+            self._send_json({
+                "ok": False,
+                "error": "没有可用账号（auths/ 为空，且网关池未加载 token）",
+                "today": wb_checkin.utc8_date(),
+            })
+            return
+
+        # 签到前刷新即将过期的 token；失败不阻断，具体账号按原错误反馈。
+        refresh_auth_tokens(force=False)
+        accounts = get_task_account_list()
+        if uid:
+            accounts = [a for a in accounts if str(a.get("uid")) == str(uid) or a.get("name") == uid]
+
+        result = wb_checkin.check_in_accounts(
+            accounts,
+            catch_up=bool(request_data.get("catch_up", True)),
+            dry_run=bool(request_data.get("dry_run", False)),
+            force=bool(request_data.get("force", False)),
+        )
+        report = wb_checkin.report(days=days, limit=limit, uid=uid, day=day)
+        report["account_rows"] = wb_checkin.account_state_rows(accounts)
+        report["state_file"] = str(wb_checkin.CHECKIN_STATE_FILE)
+        result["report"] = report
+        self._send_json(result)
+
+    def _handle_snapshot_api(self):
+        """桌面/旧版登录快照发现与导入。GET 扫描，POST action=import 导入。"""
+        if wb_snapshot is None:
+            self._send_error("快照模块不可用: %s" % log_snapshot_import_err, 501)
+            return
+
+        request_data: Dict[str, Any] = {}
+        content_length = int(self.headers.get("Content-Length") or 0)
+        if content_length > 0:
+            raw_body = self.rfile.read(content_length).decode("utf-8", "replace")
+            try:
+                parsed_body = json.loads(raw_body) if raw_body.strip() else {}
+            except json.JSONDecodeError:
+                parsed_body = {}
+            if isinstance(parsed_body, dict):
+                request_data = parsed_body
+
+        if self.command == "POST" and str(request_data.get("action") or "") == "import":
+            result = wb_snapshot.import_snapshot(request_data, dry_run=bool(request_data.get("dry_run")))
+            if result.get("ok") and not request_data.get("dry_run"):
+                load_auths()
+                result["pool_accounts"] = len(pool.accounts)
+            self._send_json(result, 200 if result.get("ok") else 400)
+            return
+
+        extra = request_data.get("extra_roots")
+        if not isinstance(extra, list) or not extra:
+            extra = [str(BASE_DIR.parent)]
+        self._send_json(wb_snapshot.scan(extra_roots=extra))
+
     def _handle_panel_api(self):
         """处理面板 API 请求"""
         if not self._check_auth():
@@ -1390,6 +2281,43 @@ class GatewayHandler(BaseHTTPRequestHandler):
             request_data = {}
         
         # 路由分发
+        if "/panel/api/usage" in self.path:
+            self._handle_usage_api()
+            return
+
+        if "/panel/api/models" in self.path:
+            self._handle_models_api()
+            return
+
+        if "/panel/api/pool" in self.path:
+            self._handle_pool_api()
+            return
+
+        if "/panel/api/checkin" in self.path:
+            self._handle_checkin_api()
+            return
+
+        if "/panel/api/logs" in self.path:
+            self._handle_logs_api()
+            return
+
+        if "/panel/api/collect" in self.path:
+            self._handle_collect_api(request_data)
+            return
+
+        if "/panel/api/diagnose" in self.path:
+            self._handle_diagnose_api()
+            return
+
+        if "/panel/api/keepalive" in self.path:
+            # 账号保活（原老控制台 🛡️ 页签的能力）；dry_run 时只演练不发请求
+            self._send_json(handle_task_action("keepalive", request_data))
+            return
+
+        if "/panel/api/snapshots" in self.path:
+            self._handle_snapshot_api()
+            return
+
         if "/panel/api/accounts" in self.path:
             if self.command == "GET":
                 self._send_json(pool.get_status())
@@ -1704,12 +2632,137 @@ setInterval(refreshDashboard, 10000);
 </html>"""
 
 
+# ===== 面板静态资源（static/ 目录）=====
+
+PANEL_STATIC_DIR = BASE_DIR / "static"
+
+STATIC_MIME = {
+    ".html": "text/html; charset=utf-8",
+    ".css": "text/css; charset=utf-8",
+    ".js": "application/javascript; charset=utf-8",
+    ".mjs": "application/javascript; charset=utf-8",
+    ".json": "application/json; charset=utf-8",
+    ".webmanifest": "application/manifest+json; charset=utf-8",
+    ".map": "application/json; charset=utf-8",
+    ".svg": "image/svg+xml",
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".ico": "image/x-icon",
+    ".woff": "font/woff",
+    ".woff2": "font/woff2",
+    ".ttf": "font/ttf",
+    ".txt": "text/plain; charset=utf-8",
+    ".md": "text/markdown; charset=utf-8",
+}
+
+
+def resolve_static(rel: str) -> Optional[Path]:
+    """把 URL 里的相对路径安全地映射到 static/ 下的文件。
+
+    只允许 static/ 内部的普通文件：拒绝空字节、绝对路径以及任何 ".." 分段，
+    这样 /panel/static/../../config.json 之类的请求拿不到 config.json 与 auths/。
+    """
+    rel = (rel or "").split("?", 1)[0].split("#", 1)[0].replace("\\", "/").strip("/")
+    if not rel:
+        rel = "index.html"
+    parts = [p for p in rel.split("/") if p]
+    if not parts or any(p in (".", "..") for p in parts):
+        return None
+    if any("\x00" in p for p in parts):
+        return None
+    root = PANEL_STATIC_DIR.resolve()
+    try:
+        resolved = root.joinpath(*parts).resolve()
+    except OSError:
+        return None
+    if resolved != root and root not in resolved.parents:
+        return None
+    if not resolved.is_file():
+        return None
+    return resolved
+
+
+def serve_static(handler, rel: str) -> bool:
+    """送出 static/ 下的一个文件；文件不存在或不合法时返回 False。"""
+    target = resolve_static(rel)
+    if target is None:
+        return False
+    try:
+        data = target.read_bytes()
+    except OSError as e:
+        log.warning("静态资源读取失败 %s: %s", target, e)
+        return False
+    ctype = STATIC_MIME.get(target.suffix.lower(), "application/octet-stream")
+    handler.send_response(200)
+    handler.send_header("Content-Type", ctype)
+    handler.send_header("Content-Length", str(len(data)))
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.end_headers()
+    if handler.command != "HEAD":
+        handler.wfile.write(data)
+    return True
+
+
+def serve_panel_sw(handler):
+    """送出面板的 Service Worker。
+
+    Service Worker 的 scope 由脚本自身 URL 决定，所以它必须挂在 /panel/ 根下
+    （/panel/static/sw.js 的 scope 只能是 /panel/static/）。源码仍放 static/sw.js，
+    这里额外声明 Service-Worker-Allowed 让 scope 覆盖整个 /panel/。
+    """
+    target = PANEL_STATIC_DIR / "sw.js"
+    try:
+        data = target.read_bytes()
+    except OSError:
+        handler.send_error(404, "Not Found")
+        return
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/javascript; charset=utf-8")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.send_header("Service-Worker-Allowed", "/panel/")
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Access-Control-Allow-Origin", "*")
+    handler.end_headers()
+    if handler.command != "HEAD":
+        handler.wfile.write(data)
+
+
+def panel_index_file() -> Optional[Path]:
+    """新面板入口 static/index.html（存在时优先于内置旧面板）。"""
+    target = PANEL_STATIC_DIR / "index.html"
+    try:
+        return target if target.is_file() else None
+    except OSError:
+        return None
+
+
 def serve_panel(handler):
-    """提供 Web 面板"""
+    """提供 Web 面板：优先 static/index.html，缺失时回退内置旧面板。"""
+    target = panel_index_file()
+    if target is not None:
+        try:
+            data = target.read_bytes()
+        except OSError:
+            data = None
+        if data is not None:
+            handler.send_response(200)
+            handler.send_header("Content-Type", "text/html; charset=utf-8")
+            handler.send_header("Content-Length", str(len(data)))
+            handler.send_header("Cache-Control", "no-store")
+            handler.end_headers()
+            if handler.command != "HEAD":
+                handler.wfile.write(data)
+            return
     handler.send_response(200)
     handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Cache-Control", "no-store")
     handler.end_headers()
-    handler.wfile.write(PANEL_HTML.encode('utf-8'))
+    if handler.command != "HEAD":
+        handler.wfile.write(PANEL_HTML.encode('utf-8'))
 
 
 # 重写 GatewayHandler 的 GET 方法以支持面板
@@ -1717,10 +2770,20 @@ _original_do_get = GatewayHandler.do_GET
 
 
 def patched_do_get(self):
-    if self.path == "/panel/" or self.path == "/panel":
+    path = (self.path or "").split("?", 1)[0].split("#", 1)[0]
+    if path in ("/panel", "/panel/", "/panel/index.html"):
         serve_panel(self)
-    else:
-        _original_do_get(self)
+        return
+    if path in ("/panel/sw.js", "/panel/service-worker.js"):
+        serve_panel_sw(self)
+        return
+    if path.startswith("/panel/static/"):
+        rel = path[len("/panel/static/"):]
+        if serve_static(self, rel):
+            return
+        self.send_error(404, "Not Found")
+        return
+    _original_do_get(self)
 
 
 GatewayHandler.do_GET = patched_do_get
@@ -1771,6 +2834,13 @@ def main():
     except KeyboardInterrupt:
         print("\n[停止] 正在关闭服务...")
         pool.save(STATE_FILE)
+        # 退出前把还未落盘的 Token 用量刷掉
+        if wb_usage is not None:
+            try:
+                wb_usage.flush()
+                log.info("Token 用量已保存: %s", wb_usage.get_store().path)
+            except Exception as exc:
+                log.warning("Token 用量保存失败: %s", exc)
         server.shutdown()
         print("[完成] 服务已停止")
 

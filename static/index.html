@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<meta name="color-scheme" content="dark light">
+<meta name="theme-color" content="#0b0f18" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#eef1f9" media="(prefers-color-scheme: light)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="WorkBuddy">
+<meta name="description" content="WorkBuddy 统一管理器：账号池、模型、Token 统计、积分、签到、任务与诊断，一个界面全搞定。">
+<title>WorkBuddy 统一管理器</title>
+<link rel="manifest" href="/panel/static/manifest.webmanifest">
+<link rel="icon" type="image/png" href="/panel/static/icon-192.png">
+<link rel="apple-touch-icon" href="/panel/static/icon-192.png">
+<link rel="stylesheet" href="/panel/static/app.css">
+</head>
+<body>
+<div class="app">
+
+  <aside class="sidebar" id="sidebar" aria-label="主导航">
+    <div class="brand">
+      <div class="brand-mark">WB</div>
+      <div class="brand-text">
+        <b>WorkBuddy</b>
+        <span>统一管理器</span>
+      </div>
+    </div>
+
+    <nav class="nav scroll-y" id="nav">
+      <p class="nav-group">网关</p>
+      <a class="nav-item" data-page="overview"><span class="ni">◎</span>概览</a>
+      <a class="nav-item" data-page="pool"><span class="ni">⚖</span>账号池</a>
+      <a class="nav-item" data-page="models"><span class="ni">✦</span>模型</a>
+      <a class="nav-item" data-page="tasks"><span class="ni">✓</span>任务中心</a>
+
+      <p class="nav-group">WorkBuddy</p>
+      <a class="nav-item" data-page="accounts"><span class="ni">☰</span>账号管理</a>
+      <a class="nav-item" data-page="tokens"><span class="ni">▤</span>Token 统计</a>
+      <a class="nav-item" data-page="credits"><span class="ni">◈</span>积分统计</a>
+
+      <p class="nav-group">系统</p>
+      <a class="nav-item" data-page="collect"><span class="ni">◷</span>实时日志</a>
+      <a class="nav-item" data-page="diagnose"><span class="ni">✚</span>诊断</a>
+      <a class="nav-item" data-page="checkin"><span class="ni">✓</span>签到日志</a>
+      <a class="nav-item" data-page="settings"><span class="ni">⚙</span>设置</a>
+    </nav>
+
+    <div class="sidebar-foot">
+      <div class="foot-line" id="footVersion">v1.0.0</div>
+      <div class="foot-line muted" id="footUptime">—</div>
+    </div>
+  </aside>
+
+  <div class="scrim" id="scrim"></div>
+
+  <main class="main">
+    <header class="topbar">
+      <button class="icon-btn only-mobile" id="menuBtn" aria-label="菜单">☰</button>
+      <div class="page-head">
+        <h1 id="pageTitle">概览</h1>
+        <p id="pageSub">正在读取…</p>
+      </div>
+      <div class="topbar-right">
+        <span class="pill pill-live" title="已连接账号数">
+          <i class="dot"></i><b id="pillAccounts">–</b><span class="pill-label">个账号</span>
+        </span>
+        <button class="btn btn-sm btn-primary" id="liveBtn" title="自动刷新">实时 15s</button>
+        <button class="icon-btn" id="themeBtn" aria-label="切换主题">◐</button>
+        <button class="btn btn-ghost" id="refreshBtn">刷新</button>
+      </div>
+    </header>
+
+    <div class="viewport scroll-y" id="view"></div>
+  </main>
+
+  <nav class="bottomnav only-mobile" id="bottomnav">
+    <a data-page="overview"><span>◎</span>概览</a>
+    <a data-page="accounts"><span>☰</span>账号</a>
+    <a data-page="tokens"><span>▤</span>Token</a>
+    <a data-page="collect"><span>◷</span>日志</a>
+    <a data-page="settings"><span>⚙</span>设置</a>
+  </nav>
+
+</div>
+<div class="toast" id="toast" role="status"></div>
+<script src="/panel/static/app.js"></script>
+</body>
+</html>

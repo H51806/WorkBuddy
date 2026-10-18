@@ -98,3 +98,7 @@ logs/
 *.bak.json
 *~
 .#*
+
+# ---------- 11. devtools 生成的验证/冒烟转储（可由 _smoke_runner.js 重新生成）----------
+devtools/_*.html
+devtools/_icon_shots.json

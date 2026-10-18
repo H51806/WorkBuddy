@@ -6,13 +6,14 @@ WorkBuddy 统一管理器 - 主启动器
 
 功能：
   - 一键启动 API 网关
-  - 一键启动 Web 控制台
+  - 一键启动老控制台（仅保留 /api/* 与 /legacy 兜底，根路径 302 跳转统一面板）
   - 账号池管理
   - 积分查看
   - 成长计划任务
   - 账号切换
 """
 
+import json
 import os
 import sys
 import socket
@@ -103,6 +104,20 @@ def start_console(port=CONSOLE_PORT):
         return False
 
 
+def panel_url() -> str:
+    """统一面板地址（与 wb_webui.py 的 302 目标一致）；config.json 有 api_key 时带上 #key= 片段，免手输密钥。"""
+    url = f"http://127.0.0.1:{GATEWAY_PORT}/panel/"
+    try:
+        with open(BASE_DIR / "config.json", "r", encoding="utf-8") as f:
+            key = (json.load(f).get("api_key") or "").strip()
+        if key:
+            from urllib.parse import quote
+            return url + "#key=" + quote(key, safe="")
+    except Exception:
+        pass
+    return url
+
+
 def open_console_browser(url, delay=1.5):
     """延迟在默认浏览器中打开控制台（等 HTTP 服务真正可连接之后）"""
     def _open():
@@ -123,9 +138,9 @@ def print_banner():
 ╔═══════════════════════════════════════════════════════════════╗
 ║          WorkBuddy 统一管理器 v1.0                             ║
 ║                                                               ║
+║  • 统一面板    : http://127.0.0.1:7863/panel/                  ║
 ║  • API 网关    : http://127.0.0.1:7863                        ║
-║  • 管理面板    : http://127.0.0.1:7863/panel/                  ║
-║  • Web 控制台  : http://localhost:8789                         ║
+║  • 老控制台    : http://localhost:8789  (打开即跳到统一面板)   ║
 ║                                                               ║
 ║  按 Ctrl+C 停止所有服务                                        ║
 ╚═══════════════════════════════════════════════════════════════╝
@@ -142,8 +157,8 @@ def main():
         print("[错误] 网关启动失败，退出")
         return
     
-    # 启动控制台
-    console_url = f"http://localhost:{CONSOLE_PORT}/"
+    # 启动老控制台（数据接口 + /legacy 兜底），浏览器直接打开统一面板
+    console_url = panel_url()
     if start_console():
         print(f"\n[控制台] 请在浏览器打开: {console_url}")
         open_console_browser(console_url)

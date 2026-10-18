@@ -119,6 +119,14 @@ def datetime_iso() -> str:
     return time.strftime("%Y-%m-%d %H:%M:%S")
 
 
+def _task_reward(code: str) -> str:
+    """按任务码查奖励文案（账本里存人可读的 +300c +8e）。"""
+    for t in TASKS:
+        if t.get("code") == code:
+            return str(t.get("reward") or "")
+    return ""
+
+
 # ===== 账号加载 =====
 def load_accounts() -> List[Dict[str, Any]]:
     """从 auths/ 目录发现账号。兼容两种结构：
@@ -156,6 +164,7 @@ def _normalize_account(raw: Dict[str, Any], filename: str) -> Dict[str, Any]:
         "uid": str(uid),
         "name": str(name),
         "domain": str(domain),
+        "realm": str(raw.get("realm") or auth.get("realm") or ""),
         "file": filename,
         "device_token": raw.get("device_token") or auth.get("device_token") or "",
     }
@@ -1348,6 +1357,26 @@ def run_one_account(acc: Dict[str, Any], codes: Optional[List[str]] = None,
                     res["claim_ok"] = False
         if not res.get("ok") and not res.get("skipped"):
             result["errors"] += 1
+        # 收益账本：每个任务一行（含跳过与失败），供面板「签到日志」页汇总。
+        try:
+            _log_task({
+                "kind": "task",
+                "uid": acc.get("uid"),
+                "name": acc.get("name"),
+                "code": code,
+                "task_code": code,
+                "reward": _task_reward(code),
+                "ok": bool(res.get("ok")),
+                "skipped": bool(res.get("skipped")),
+                "effect": res.get("effect") or "",
+                "msg": res.get("msg") or "",
+                "claim_ok": bool(res.get("claim_ok")),
+                "progress_before": res.get("progress_before"),
+                "progress_after": res.get("progress_after"),
+                "dry_run": bool(dry_run),
+            })
+        except Exception as e:
+            log.warning(f"账本写入失败 {code}: {e}")
         result["steps"].append(res)
     return result
 

@@ -10,8 +10,11 @@ JS 里的 '\\n' 被 Python 先转义成了真正的换行，于是 JS 字符串�
 
 本脚本把这类问题变成一条命令就能查出来：
   1) py_compile 全部模块
-  2) 抽出 WebUI 与网关面板里的 JS，用 node --check 做真正的语法校验
-  3) 检查页面里不该出现的残留（未替换的占位符、被误转义的反斜杠）
+  2) 抽出 WebUI 与网关面板里的 JS，外加统一面板的 static/app.js、static/sw.js，
+     用 node --check 做真正的语法校验
+  3) 检查页面里不该出现的残留（未替换的占位符、被误转义的反斜杠），
+     以及 static/ 交付文件是否齐全、manifest.webmanifest 是否合法 JSON、
+     static/ 里有没有混进开发期临时验证页（它会随 /panel/static/* 对外暴露）
   4) 起临时服务，冒烟所有 HTTP 接口
 
 用法：
@@ -82,7 +85,7 @@ def get_panel_html():
 
 
 def check_pages():
-    header("2/4  页面 JS 语法检查 (node --check)")
+    header("2/4  页面与静态资源 JS 语法检查 (node --check)")
     node = shutil_which("node")
     if not node:
         print(WARN + "没找到 node，跳过 JS 语法校验（这是最重要的一项，建议装上 Node.js）")
@@ -123,6 +126,26 @@ def check_pages():
                 print("        " + line)
             problems.append(f"{label} JS 语法错误（页面按钮会全部失效）")
 
+    # 统一面板的界面已经搬进 static/*.js（不再内联在 HTML 里），必须单独校验，
+    # 否则 app.js 里一个笔误上面这段照样全 PASS，而浏览器打开是一片空白。
+    static_js = [
+        ("统一面板 app.js", BASE_DIR / "static" / "app.js"),
+        ("统一面板 sw.js", BASE_DIR / "static" / "sw.js"),
+    ]
+    for label, path in static_js:
+        if not path.exists():
+            print(FAIL + f"{label}: 文件不存在 {path}")
+            problems.append(f"{label} 不存在（统一面板会白屏）")
+            continue
+        r = subprocess.run([node, "--check", str(path)], capture_output=True, text=True)
+        if r.returncode == 0:
+            print(PASS + f"{label}（{len(path.read_text(encoding='utf-8', errors='replace'))} 字符）")
+        else:
+            print(FAIL + f"{label} JS 语法错误：")
+            for line in (r.stderr or r.stdout).strip().splitlines()[:12]:
+                print("        " + line)
+            problems.append(f"{label} JS 语法错误（统一面板按钮会全部失效）")
+
 
 def check_leftovers():
     header("3/4  源码检查（原始字符串 / 密钥占位符）")
@@ -161,6 +184,33 @@ def check_leftovers():
         else:
             print(PASS + f"{label}: 密钥占位符已替换")
 
+    # 统一面板的静态资源由网关直接对外托管（/panel/static/<file>），逐项确认
+    static_dir = BASE_DIR / "static"
+    required = ["index.html", "app.css", "app.js", "manifest.webmanifest", "sw.js",
+                "icon-192.png", "icon-512.png", "icon-maskable-512.png"]
+    missing = [n for n in required if not (static_dir / n).is_file()]
+    if missing:
+        print(FAIL + f"static/ 缺少交付文件: {', '.join(missing)}")
+        problems.append(f"static/ 缺少 {', '.join(missing)}")
+    else:
+        print(PASS + f"static/ 交付文件齐全（{len(required)} 个，共 "
+                     f"{sum((static_dir / n).stat().st_size for n in required)} 字节）")
+
+    try:
+        json.loads((static_dir / "manifest.webmanifest").read_text(encoding="utf-8"))
+        print(PASS + "manifest.webmanifest 是合法 JSON")
+    except Exception as e:
+        print(FAIL + f"manifest.webmanifest 解析失败: {e}")
+        problems.append(f"manifest.webmanifest 非法: {e}")
+
+    # static/ 会被原样对外托管：开发期验证页（_preview_/_report_/_probe）不能留在里面
+    strays = sorted(p.name for p in static_dir.glob("_*"))
+    if strays:
+        print(WARN + f"static/ 里有开发期临时文件（会被 /panel/static/* 对外暴露）: {', '.join(strays)}")
+        warnings.append("static/ 内有临时文件: " + ", ".join(strays))
+    else:
+        print(PASS + "static/ 无开发期临时文件")
+
 
 def _get(url, timeout=8):
     req = urllib.request.Request(url)
@@ -189,7 +239,15 @@ def check_online():
         ("网关 /api/auth-files", "http://127.0.0.1:7863/api/auth-files", authed),
         ("网关 /tasks/list", "http://127.0.0.1:7863/tasks/list", authed),
         ("网关面板 /panel/", "http://127.0.0.1:7863/panel/", None),
-        ("控制台 /", "http://127.0.0.1:8789/", None),
+        ("网关面板 app.css", "http://127.0.0.1:7863/panel/static/app.css", None),
+        ("网关面板 app.js", "http://127.0.0.1:7863/panel/static/app.js", None),
+        ("网关面板 manifest", "http://127.0.0.1:7863/panel/static/manifest.webmanifest", None),
+        ("网关面板 icon-192", "http://127.0.0.1:7863/panel/static/icon-192.png", None),
+        ("网关面板 sw.js", "http://127.0.0.1:7863/panel/sw.js", None),
+        ("网关面板 /panel/api/logs", "http://127.0.0.1:7863/panel/api/logs?n=5", authed),
+        ("网关面板 /panel/api/diagnose", "http://127.0.0.1:7863/panel/api/diagnose", authed),
+        ("控制台 / (302 → 统一面板)", "http://127.0.0.1:8789/", None),
+        ("控制台 /legacy", "http://127.0.0.1:8789/legacy", None),
         ("控制台 /api/status", "http://127.0.0.1:8789/api/status", None),
         ("控制台 /favicon.ico", "http://127.0.0.1:8789/favicon.ico", None),
     ]
@@ -198,6 +256,13 @@ def check_online():
         try:
             status, body = (fn or _get)(url)
             extra = ""
+            if url.endswith("/panel/api/diagnose"):
+                try:
+                    data = json.loads(body)
+                    checks = data.get("checks") or []
+                    extra = f" 通过 {sum(1 for c in checks if c.get('ok'))}/{len(checks)}"
+                except Exception:
+                    pass
             if url.endswith("/tasks/list"):
                 try:
                     data = json.loads(body)

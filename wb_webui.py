@@ -2,12 +2,10 @@
 """
 WorkBuddy 统一管理器 - WebUI 控制台
 ====================================
-整合所有功能到单一界面：
-  - 账号池管理
-  - 积分查看
-  - 成长计划任务
-  - 账号切换
-  - 网关管理
+界面已合并到网关面板 http://127.0.0.1:7863/panel/（见 static/）：
+本进程保留 /api/* 数据接口（老面板依赖），根路径 / 直接 302 跳到统一面板，
+/legacy 仍可打开旧界面兜底。原老控制台独占的能力（采集实时日志、系统诊断、
+账号保活）已抽到 wb_ops.py 并由网关面板的「实时日志」「诊断」页复用。
 """
 
 import json
@@ -40,10 +38,16 @@ def _load_api_key() -> str:
 
 API_KEY = _load_api_key() or "sk-CHANGEME-please-set-your-own-key"
 
-# 状态
-collect_proc = None
-collect_log = []
-collect_lock = threading.Lock()
+# 状态：采集进程与自检逻辑已抽到 wb_ops.py，老控制台与统一面板共用一份实现
+from wb_ops import (  # noqa: E402
+    start_collect,
+    stop_collect,
+    get_collect_status,
+    get_collect_log,
+    diagnose_python,
+    diagnose_gateway,
+    diagnose_deps,
+)
 
 
 def get_gateway_status():
@@ -254,55 +258,6 @@ def enrich_accounts_with_credits(accounts):
     return accounts
 
 
-def diagnose_python():
-    """诊断 Python 运行时"""
-    import platform
-    lines = [
-        f"Python {platform.python_version()}",
-        f"executable: {sys.executable}",
-        f"platform: {platform.platform()}",
-        f"pid: {os.getpid()}",
-        f"cwd: {os.getcwd()}",
-    ]
-    return " | ".join(lines)
-
-
-def diagnose_gateway():
-    """诊断网关连通性"""
-    st = get_gateway_status()
-    detail = [f"gateway {st.get('status')} on :{st.get('port')}"]
-    try:
-        req = urllib.request.Request(
-            f"{GATEWAY_URL}/status",
-            headers={"Authorization": f"Bearer {API_KEY}"},
-        )
-        with urllib.request.urlopen(req, timeout=5) as resp:
-            data = json.loads(resp.read().decode("utf-8", "replace"))
-        detail.append(f"accounts={data.get('total', 0)}")
-        detail.append(f"auth_files={len(data.get('auth_files', []))}")
-        detail.append(f"version={data.get('version')}")
-    except Exception as e:
-        detail.append(f"status query failed: {e}")
-    return " | ".join(detail)
-
-
-def diagnose_deps():
-    """诊断可选依赖与关键文件"""
-    deps = []
-    for mod in ("playwright", "psutil", "requests"):
-        try:
-            __import__(mod)
-            deps.append(f"{mod}=OK")
-        except Exception:
-            deps.append(f"{mod}=MISSING(optional)")
-    for name in ("wb_gateway.py", "wb_tasks.py", "wb_auth.py", "wb_credits_fetcher.py"):
-        deps.append(f"{name}={'OK' if (BASE_DIR / name).exists() else 'MISSING'}")
-    auth_dir = BASE_DIR / "auths"
-    n_auth = len(list(auth_dir.glob("*.json"))) if auth_dir.exists() else 0
-    deps.append(f"auths={n_auth}")
-    return " | ".join(deps)
-
-
 def build_report_html():
     """生成采集/任务报告页面"""
     credits = get_credits_data()
@@ -346,105 +301,6 @@ th{{background:#1e293b}} .line{{font-family:Consolas,monospace;font-size:12px;co
 </body></html>"""
 
 
-def start_collect(action="collect"):
-    """启动采集进程"""
-    global collect_proc, collect_log
-    
-    with collect_lock:
-        if collect_proc and collect_proc.poll() is None:
-            return {"success": False, "message": "采集已在运行中"}
-        
-        log_file = DATA_DIR / "collect_log.txt"
-        log_file.parent.mkdir(exist_ok=True)
-        
-        # 启动采集
-        cmd = [
-            sys.executable,
-            str(BASE_DIR / "wb_credits_fetcher.py"),
-            "--auto"
-        ]
-        
-        try:
-            collect_proc = subprocess.Popen(
-                cmd,
-                cwd=str(BASE_DIR),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
-            )
-            collect_log = []
-            
-            # 读取日志线程
-            def read_log():
-                for line in iter(collect_proc.stdout.readline, b''):
-                    line = line.decode('utf-8', errors='replace').strip()
-                    collect_log.append(line)
-                    with open(log_file, 'a', encoding='utf-8') as f:
-                        f.write(line + '\n')
-            
-            t = threading.Thread(target=read_log, daemon=True)
-            t.start()
-            
-            return {"success": True, "message": "采集已启动", "pid": collect_proc.pid}
-        except Exception as e:
-            return {"success": False, "message": f"启动失败: {e}"}
-
-
-def stop_collect():
-    """停止采集"""
-    global collect_proc
-    
-    if collect_proc and collect_proc.poll() is None:
-        try:
-            collect_proc.terminate()
-            collect_proc.wait(timeout=5)
-        except Exception:
-            try:
-                collect_proc.kill()
-            except Exception:
-                pass
-        return {"success": True, "message": "采集已停止"}
-    return {"success": False, "message": "没有正在运行的采集"}
-
-
-def _collect_hint():
-    """根据采集日志尾部识别常见失败原因，给出可操作提示。
-
-    最常见的两类：
-    - spawn EPERM：Playwright 无法启动浏览器（受限/沙箱环境）。
-    - 登录态过期：需要重新登录。
-    """
-    joined = "\n".join(collect_log[-80:])
-    if "spawn EPERM" in joined or "BrowserType.launch" in joined:
-        return ("浏览器被当前运行环境限制启动（spawn EPERM）。采集依赖 Playwright + Edge，"
-                "请在普通桌面环境运行（双击「一键启动.bat」），不要放在受限沙箱/服务里；"
-                "或者改用 WebUI 的「添加/登录账号」OAuth 登录，那条链路不需要浏览器。")
-    if "Traceback" in joined:
-        return "采集进程异常退出，详情见 wb_data/fetch_log.txt。"
-    return ""
-
-
-def get_collect_status():
-    """获取采集状态"""
-    global collect_proc
-
-    running = bool(collect_proc and collect_proc.poll() is None)
-    exit_code = None
-    if collect_proc is not None and not running:
-        exit_code = collect_proc.returncode
-
-    result = {
-        "running": running,
-        "pid": collect_proc.pid if collect_proc else None,
-        "exit_code": exit_code,
-        "log": collect_log[-30:],
-    }
-    hint = _collect_hint()
-    if hint and not running:
-        result["hint"] = hint
-    return result
-
-
 # ===== WebUI Handler =====
 class WebUIHandler(BaseHTTPRequestHandler):
     """WebUI HTTP 处理器"""
@@ -470,8 +326,27 @@ class WebUIHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(text.encode('utf-8'))
     
+    def panel_url(self) -> str:
+        """统一面板地址；config.json 里有真实 api_key 时带上 #key= 片段，省得手输密钥。"""
+        base = f"http://127.0.0.1:{GATEWAY_PORT}/panel/"
+        key = _load_api_key()
+        if not key:
+            return base
+        try:
+            from urllib.parse import quote
+            return base + "#key=" + quote(key, safe="")
+        except Exception:
+            return base
+
     def do_GET(self):
         if self.path == '/' or self.path == '/index.html':
+            # 统一入口：老控制台不再自带界面，直接跳到唯一面板（静态文件 + 全部 API 都在网关上）
+            self.send_response(302)
+            self.send_header('Location', self.panel_url())
+            self.send_header('Cache-Control', 'no-store')
+            self.end_headers()
+        elif self.path == '/legacy':
+            # 兜底：面板打不开时还能用老界面看数据
             self._send_html(self.get_index_html())
         elif self.path == '/favicon.ico':
             # 桌面浏览器会自动请求 favicon；不处理会在控制台留下 404 噪音
@@ -520,7 +395,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         elif self.path == '/api/credits':
             self._send_json(get_credits_data())
         elif self.path == '/api/logs':
-            self._send_json({"log": collect_log[-100:]})
+            self._send_json({"log": get_collect_log(100)})
         elif self.path == '/api/collect/status':
             self._send_json(get_collect_status())
         elif self.path == '/api/report':

@@ -14,6 +14,10 @@ selfcheck.py 查的是“服务器有没有把正确的页面发出来”，
   5) 实时面板 iframe 是否加载、是否报 401 / .reduce 崩溃
   6) 控制台是否有任何 JS 报错、任何 HTTP 4xx/5xx
 
+注意：界面已合并到统一面板，老控制台根路径 8789/ 现在会 302 跳到
+http://127.0.0.1:7863/panel/。所以本脚本默认打 8789/legacy（老界面兜底），
+末尾再补一次统一面板的冒烟（11 个视图逐页看 #view 是否渲染出内容）。
+
 用法（需先启动 一键启动.bat，另开一个窗口运行）：
     python browser_check.py
 """
@@ -36,8 +40,21 @@ except ImportError:
     print("缺少 playwright，请先运行：pip install playwright && playwright install msedge")
     sys.exit(2)
 
-URL = "http://localhost:8789/"
+URL = "http://localhost:8789/legacy"          # 老界面兜底入口（8789/ 根路径已 302 跳到统一面板）
+PANEL_URL = "http://127.0.0.1:7863/panel/"    # 统一面板（本项目唯一界面）
+PANEL_PAGES = ["overview", "pool", "accounts", "models", "tokens", "credits",
+               "tasks", "collect", "diagnose", "checkin", "settings"]
 errors, console, bad = [], [], []
+
+
+def api_key():
+    """读 config.json 的 api_key，用于给面板 URL 拼 #key= 片段（拼不上也能开，只是会 401）。"""
+    try:
+        import json
+        cfg = json.loads((BASE_DIR / "config.json").read_text(encoding="utf-8"))
+        return str(cfg.get("api_key") or "")
+    except Exception:
+        return ""
 
 
 def main():
@@ -117,6 +134,34 @@ def main():
                 pg.wait_for_timeout(1200)
                 acc = (f.evaluate("document.getElementById('accounts-table')?.innerText") or "")
                 print("  账号表:", acc[:160].replace("\n", " | "))
+
+        print("\n--- 7) 统一面板 /panel/（唯一界面）---")
+        try:
+            k = api_key()
+            purl = PANEL_URL + ("#key=" + k if k else "")
+            presp = pg.goto(purl, wait_until="load", timeout=20000)
+            pg.wait_for_timeout(1500)
+            print("  面板 HTTP:", presp.status if presp else None)
+            info = pg.evaluate(
+                "[document.querySelectorAll('#nav .nav-item').length,"
+                " document.querySelectorAll('#view *').length,"
+                " (document.getElementById('pageTitle') || {}).textContent || '']")
+            print("  导航项:", info[0], " 首屏 #view 节点:", info[1], " 标题:", info[2])
+            if info[1] < 5:
+                print("  ✗ 首屏 #view 没有渲染出内容（JS 报错 / 401 / 后端不可达）")
+                errors.append("统一面板首屏 #view 为空")
+            for page in PANEL_PAGES:
+                pg.evaluate("location.hash = 'p=" + page + "'")
+                pg.wait_for_timeout(420)
+                cnt = pg.evaluate("document.querySelectorAll('#view *').length")
+                title = pg.evaluate("(document.getElementById('pageTitle') || {}).textContent || ''")
+                good = cnt > 5
+                print("    %-9s 节点=%-6s %-4s %s" % (page, cnt, "✓" if good else "✗", title))
+                if not good:
+                    errors.append("统一面板 %s 视图渲染为空" % page)
+        except Exception as e:
+            print("  ✗ 统一面板访问失败:", e)
+            errors.append("统一面板访问失败: %s" % e)
 
         print("\n--- console 报错 ---")
         errs = [c for c in console if c.startswith("[error]") or c.startswith("[warning]")]

@@ -5,26 +5,26 @@
 <h1 align="center">WorkBuddy2API Panel</h1>
 
 <p align="center">
-  <b>把腾讯 CodeBuddy 账号变成 OpenAI 兼容 API 的多账号网关 · 附 Web 管理面板</b><br>
-  Web 面板 · OAuth 浏览器登录 · 账号池轮转 · 熔断与冷却 · 会话粘性 · 定时签到 / 活跃 / 旅行 / 保活 · <b>成长任务一键完成（17/18）</b> · 流式 / 非流式
+  <b>把腾讯 CodeBuddy 账号变成 OpenAI 兼容 API 的多账号网关 · 附自研统一面板</b><br>
+  统一面板（11 视图 · 手机 PWA）· OAuth 设备授权登录 · 账号池四策略 · 熔断与冷却 · 会话粘性 · <b>成长任务一键完成（16/17）</b> · 签到与收益账本 · 实时日志 / 诊断 · 流式 / 非流式
 </p>
 
 <p align="center">
-  <img alt="Go" src="https://img.shields.io/badge/Go-1.22.5-00ADD8?logo=go&logoColor=white&style=flat-square">
+  <img alt="Python" src="https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white&style=flat-square">
   <img alt="API" src="https://img.shields.io/badge/API-OpenAI_Compatible-412991?style=flat-square">
-  <img alt="Deploy" src="https://img.shields.io/badge/Deploy-Single_Binary%20%7C%20Docker-2496ED?style=flat-square">
+  <img alt="Deploy" src="https://img.shields.io/badge/Deploy-%E5%8F%8C%E5%87%BB%20%E4%B8%80%E9%94%AE%E5%90%AF%E5%8A%A8.bat-2496ED?style=flat-square">
   <img alt="Transport" src="https://img.shields.io/badge/Transport-SSE%20%2F%20Streaming-0DBD8B?style=flat-square">
 </p>
 
 <p align="center">
-  <a href="./ARCHITECTURE.md">🏛️ 架构与原理</a> · <a href="#项目简介">项目简介</a> · <a href="#核心能力">核心能力</a> · <a href="#web-管理面板">Web 面板</a>
+  <a href="./ARCHITECTURE.md">🏛️ 架构与原理</a> · <a href="#项目简介">项目简介</a> · <a href="#核心能力">核心能力</a> · <a href="#-统一面板本项目自研-panel">统一面板</a>
 </p>
 
 ---
 
 > **本项目是 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api) 的增强分支**（fork）。
 > 上游仓库现已删除；本项目**已同步至上游删库前的最后一次更新**（`ea8b1e5`），此后由本分支独立维护演进。
-> 在上游基础上重构了可视化运维层；差异概览见 [与上游的差异](#-与上游的差异)，上游设计的精巧之处（账号池调度、错误分类、提示词体系）原样保留，详见下文。
+> 在上游设计之上做了 Python 重写 + 自研面板 + 移动端；差异概览见 [与上游的差异](#-与上游的差异)。**注意：上游 Go 版的部分实现（提示词体系、错误码精细分类、出站 UA / 指纹可配、定时调度器、Redis 镜像）在本分支没有移植**，逐项对照见下文。
 
 > ⚠️ **本项目仅限自用账号（签到 / 保活 / 个人工具接入），不支持同时也是禁止批量小号分发额度、二次打包或收费售卖。** 详见 [使用声明（必读）](#使用声明必读)。
 
@@ -51,7 +51,7 @@
 
 WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 CodeBuddy（`copilot.tencent.com`）账号包装为统一的 `/v1/chat/completions` 服务。
 
-- 官方不提供 OpenAI 形态的开放 API，本项目通过 **OAuth 设备授权**（WebUI「添加账号」按钮，浏览器完成登录）获取账号凭证，在网关侧做 token 自动刷新、账号池调度与流量治理；
+- 官方不提供 OpenAI 形态的开放 API，本项目通过 **OAuth 设备授权**（面板「账号管理」页扫码，浏览器完成登录）获取账号凭证，在网关侧做 token 自动刷新、账号池调度与流量治理；
 - 面向 **个人多账号** 场景：多账号共享、单号故障自动换号、冷却 / 熔断防止雪崩、会话粘性保证多轮上下文不跳号；
 - 对客户端只暴露 OpenAI 兼容接口，现有 SDK / 前端 / 工具 **零改造接入**。
 
@@ -61,158 +61,131 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 
 | 能力 | 说明 |
 |---|---|
-| 🔑 **浏览器 OAuth 登录** | WebUI「添加账号」按钮打开设备授权页面，凭证自动落盘到 `auths/` 并热加载进池（免重启） |
-| 🔄 **多账号池** | 快过期积分加权 + 成本分层 + 加权随机选号，Top-5 候选 + 防惊群 |
-| 🛡️ **熔断与冷却** | 429 软冷却 600s 起指数退避（封顶 `soft_rate_max`）、404 固定 60s 短冷却、402 硬冷却至次日 04:00、连续失败熔断、在途租约限流 |
-| 🧲 **会话粘性** | 同一会话（`conversation_id`）尽量绑定同一账号，TTL 滚动续期，失败自动解绑，可镜像 Redis 防重启丢失 |
-| ⏰ **定时任务** | 签到（09/21 点，末尾自动跑**连登管家**：兑换已解锁档位 + 抽完抽奖次数）+ 活跃上报（10 点，点亮连登 / 解锁领养 + streak 自检）+ 猫猫旅行（09/21 点，独立排程）+ token 保活（22 点），四类独立开关 |
-| ⚡ **流式 + 非流式** | 出站强制 `stream:true`；SSE 帧按规范白名单重建；非流式由本地聚合为单响应 |
-| 🧠 **推理模型兼容** | DeepSeek 思维链注入（`thinking.type=enabled` + 默认档）、`reasoning_content` 多轮回填、effort 档位自动降级 |
-| 💬 **系统提示词体系** | 网关自有提示词替换客户端 system（默认 `custom`），从源头消灭 system 来源的内容误报；`passthrough` 遇拦截自动降级重试 |
-| 🗑️ **指纹脱敏** | 出站请求体黑名单指纹字段清洗（可关闭），与提示词体系两层叠加 |
-| 📊 **可观测** | 每请求一行表格日志（TTFB / token 速率 / uid）；`/healthz` 带 `service` 身份标识可接负载均衡 / 宿主探活 |
-| 💾 **状态持久化** | 池状态本地原子落盘 + Upstash Redis 异步镜像（可选），重启择新恢复 |
-| 🖥️ **Web 管理面板** | 内嵌单页面板（明暗主题，七个视图）：账号运维 / 用量与积分分析 / 模型档位条件查询 / 在线改配置（热生效）/ 运行日志（含**调用来源 IP·UA** 与时间区间）/ 积分任务，见 [Web 管理面板](#-web-管理面板) |
+| **OAuth 设备授权登录** | 不需要官方客户端：面板「账号管理」页扫码完成设备授权，凭证落盘 `auths/` 并**热加载进池（免重启）**（`wb_auth.py`） |
+| **多账号池调度** | 优先级 / 粘性 / 轮询 / 加权四种分布，外加区域筛选、积分下限、快过期优先、闲置加权、冷却与熔断（`wb_pool_policy.py`） |
+| **OpenAI 兼容网关** | `POST /v1/chat/completions`（流式与非流式）+ `GET /v1/models` + `GET /healthz`，Bearer 鉴权，现有 SDK / 前端 / 工具零改造接入（`wb_gateway.py`） |
+| **会话粘性** | 同一个会话键（请求体的 `user`，缺省则视为新会话）尽量绑定同一账号，账号不可用时自动解绑重选，保证多轮上下文不跳号 |
+| **模型能力透出** | `/v1/models` 附带上下文窗口 / 最大输出 / 图片能力 / 推理档位等上游真实字段（目录里没证据的一律不声明，见 `wb_models.py`） |
+| **状态持久化** | 池状态与游标原子落盘 `data/state.json`，重启择新恢复；用量按小时分桶落盘 `data/usage.json`（`wb_usage.py`） |
+| **可观测** | `/status` 汇总池状态与实时余额，`/panel/api/*` 供面板读取，面板 11 个视图见下 |
 
-## 🎯 成长任务一键完成（17/18）
+## 🎯 成长任务一键完成（16/17）
 
-官方「成长计划」的 18 个成长任务中，**17 个可在面板上一键纯 API 完成**——无需安装官方客户端、无需人工交互，点一下「一键完成」即自动推进进度、等待异步计分落定并**自动领奖**。剩余任务展示操作指引。
+任务目录收录 **17 条**：**16 条可在「任务中心」一键纯 API 完成**——不用装官方客户端、不用人工交互；剩下 1 条（`Expert_Philanthropy`）需要真实捐款，只展示操作指引。任务目录定义在 `wb_tasks.py` 的 `TASKS` 里，`AUTO_TASK_CODES` 自动排除 `kind="manual"` 的条目。
 
 ### 任务覆盖与奖励
 
-| 任务 | 奖励 | 一键完成方式 |
+| 任务码 | 奖励 | 一键完成方式 |
 |---|---|---|
-| `first_buddy` | +300c +8e | 解锁上报 → 同意协议 → 领养第一只 Buddy |
-| `create_canvas` | +300c +5e | 设计画布创建事件组（Ardot 遥测） |
-| `chat_5` | +100c | 对话活跃上报 ×5（自动补足差额） |
-| `Model_chat_GLM5.2` | +100c +5e | glm-5.2 真实对话一次（发一条短消息） |
-| `RichMeow_Chat` | +100c +5e +UR Buddy | 桌面端对话事件链（6 事件，含成功回执） |
-| `Buddy_App` | +100c +5e | Buddy 应用「发现→进入→授权」事件链 |
-| `Buddy_App_QQ` | +50c +5e | 企鹅教师助手进入事件链（与上一条共用） |
-| `automation_1` | +100c +5e | 定时任务创建成功事件 |
-| `Library_read` | +100c +5e | 资料库阅读点击（web 域上报） |
-| `template_5` | +100c +5e | 模板使用事件组 ×5 |
+| `first_buddy` | +300c +8e | 领取第一只 Buddy |
+| `create_canvas` | +300c +5e | 设计创意模式创建画布 |
+| `chat_5` | +100c +5e | 和 AI 聊天 5 次 |
+| `Model_chat_GLM5.2` | +100c +5e | 体验 GLM-5.2 模型对话一次 |
+| `RichMeow_Chat` | +100c +5e +限定 Buddy | 桌面端对话 1 次 |
+| `Buddy_App` | +100c +5e | 进入任意 Buddy 应用 |
+| `Buddy_App_QQ` | +50c +5e | 企鹅教师助手进入事件 |
+| `automation_1` | +100c +5e | 设置自动化任务 |
+| `Library_read` | +100c +5e | 资料库阅读点击 |
+| `template_5` | +100c +5e | 使用 5 个模板 |
 | `playbook_prompt` | +100c +5e | 灵感案例「做同款」发送事件 |
-| `expert_5` | +100c +5e | 真实专家召唤+使用链 ×5（专家市场拉真实专家 → 真实对话 → 使用事件） |
-| `Expert_team_use_3` | +100c +5e | 专家团召唤+使用链 ×3 |
+| `expert_5` | +100c +5e | 真实专家召唤 + 使用链 ×5 |
+| `Expert_team_use_3` | +100c +5e | 专家团召唤 + 使用链 ×3 |
 | `Hp_Appearance` | +100c +5e | 主题设置 + 皮肤生效事件 |
-| `Expert_lighthouse` | +100c +5e | 轻量云专家召唤+使用链（真实对话 requestId，**可免费领一个月轻量服务器**） |
-| `skill_1` | +100c +5e | 真实对话 + 技能加载事件（skill_info） |
+| `Expert_lighthouse` | +100c +5e | 轻量云专家召唤 + 使用链（可免费领一个月轻量服务器） |
+| `skill_1` | +100c +5e | 真实对话 + 技能加载事件 |
 
-**全新账号一键全做完 ≈ +1950 credits +78 能量**，其中仅数个任务涉及真实对话（`Model_chat_GLM5.2` 一条、`expert_5`/`Expert_team_use_3`/`skill_1` 各数条 fast-model 短对话），其余全部为行为事件上报，零对话消耗。
+按上表累计，全新账号全做完 ≈ **+1950 credits +83 能量**；其中只有数个任务涉及真实对话（`Model_chat_GLM5.2` 一条、`expert_5` / `Expert_team_use_3` / `skill_1` 各数条短对话），其余全部是行为事件上报，几乎不消耗对话额度。
 
 ### 不可自动的 1 个
 
-| 任务 | 原因 |
+| 任务码 | 原因 |
 |---|---|
-| `Expert_Philanthropy` | 需真实捐款（服务端领奖时校验捐赠回执，已实测无法绕过） |
+| `Expert_Philanthropy` | 需真实捐款，无法用 API 完成（目录里 `kind` 标为 `manual`，`AUTO_TASK_CODES` 自动排除） |
 
 ### 实现原理（简述）
 
-任务计分走 `/v2/report` 行为上报，但**不同任务认不同客户端指纹**：CLI 指纹（`www.codebuddy.cn`）、桌面指纹（`copilot.tencent.com` + `WorkBuddy/5.5.6` UA + `workbuddy-desktop` 事件族）、web 指纹（`www.workbuddy.cn` + `x-client-platform: web`）。网关为每类任务构造对应指纹的判据事件链（`internal/upstream/desktop.go`）；专家类任务额外要求真实专家 id 与真实对话回执（`internal/upstream/streak.go` 之外的 expert 序列）。上报 200 ≠ 计分——面板在执行后轮询任务进度，达标即自动调用 Web 域领奖接口。
+任务计分走行为上报（`/v2/report`），但**不同任务认不同客户端指纹**：`wb_tasks.py` 内置 CLI / 桌面 / Web 三套指纹常量（`UA_CLI`、`UA_DESKTOP`、`UA_WEB`、`UA_BROWSER`）以及桌面事件族必需的字段（`DESKTOP_COMMIT`、`DESKTOP_IDE_VERSION`、`DESKTOP_OS_VERSION` 等）——**缺字段时服务端照样返回 200，但会静默丢弃，进度不涨**。上报成功也不等于计分：面板在执行后回查任务进度，达标即自动领奖。
 
 > ⚠️ 行为事件按天幂等：重复点「一键完成」不会重复扣资源，已达标的任务自动跳过。
 
-### 🧭 任务中心（面板新视图）
+### 🧭 任务中心（面板视图）
 
-「任务中心」视图把散落的任务能力收拢成一处：
+「任务中心」视图把任务能力收拢到一处：**任务目录**（每条任务的奖励、是否需手工）、**批量操作**（扫描任务进度 / 一键完成全部 / 账号保活）、**演练模式**（勾选后 `dry_run` 只演练不发请求）、**执行结果**逐条回执。对应接口 `/tasks/list`、`/tasks/scan`、`/tasks/run`、`/tasks/keepalive`。
 
-- **全账号任务扫描**：一键拉取每个账号的成长任务（未完成且可自动化的 19 项，含小程序口径的「校园日」与「小程序首对话」）+ 开学季待办，列表一目了然
-- **执行队列**：把待办按账号排队执行——账号内串行（与单任务/一键完成共用互斥锁），账号间可选并发（1-3）；执行进度实时更新到每个条目
-- **开学季独立状态卡**：每账号 5 任务（分享/桌面/对话×3/专家/学生认证）的状态矩阵 + 剩余抽奖次数，一键触发全账号闭环
-- **日志分频道**：运行日志按「任务 / 对话 / 系统」三个频道筛选——对话流量再大，任务结果也不会被冲掉；日志条目带频道徽标与时间
+### 签到与收益账本
 
-<details>
-<summary><b>🎒 开学季活动（5/5 全自动）</b>——活动期至 2026-09-24，已结束；逆向成果存档，点击展开</summary>
+签到可按每账号的错峰时点触发（不是后台排程——本项目没有调度器），面板「签到日志」页可 **立即签到（含补签）**、**只按错峰时点**、**强制重签**、**演练（不发请求）**，并给出每账号今日状态与按日收益账本（签到积分 / 任务完成 / 领奖明细），见 `wb_checkin.py`。判定「已签到」= HTTP 400 且 `code == 10001`，或消息含「今天已签到」。
 
-官方「AI 好 Buddy，开学有好礼」小程序活动的 5 个任务**全部纯 API 自动完成**（挂签到排程末尾，幂等）：
-
-| 任务 | 奖励（每日） | 判据（已逆向） |
-|---|---|---|
-| 分享活动 | +100c +1抽奖 | `share-complete` 直调即点亮 |
-| 桌面端体验（单次） | +100c +1抽奖 | viewed 激活 + 真实 chat + 桌面六事件链 |
-| 和 AI 对话 3 次 | +50c +1抽奖 | viewed 后 3 条 `chat_request_send` 埋点（无需真实会话） |
-| 召唤开学季专家 | +50c +1抽奖 | viewed 后 mp 事件链（召唤×3 + 对话） |
-| 学生认证 | +100c | 需微信学生真实认证，不做 |
-
-抽奖次数自动全部抽完。期间逆向成果（cf-connect 加密通道、mp 云对话全链路）记录在 `data/desktop-task-protocol.md` §8。
-
-同一活动在成长任务中心还有两条**小程序口径**任务（`X-Client-Platform: miniprogram` 专属下发，默认列表不可见，各 +100c+5e）：
-
-| 任务 | 判据（已逆向） |
-|---|---|
-| `school_season` 校园日 | mini `chat_request_send` + `activityId=school_open_day_2026`（无 activityId 不点亮；accept/claim 均要求 mp 头） |
-| `Sequential_Tasks_1` 小程序首对话 | mini `chat_request_send`（无 activityId，服务端按 source=mini_program 指纹关联） |
-
-任务中心扫描自动合并 mp 口径待办；accept 带**登记回读验证**（上游存在 200+OK 但未落账的形态，未生效自动重试一次）。
-
-</details>
-
-### 连登兑换与抽奖（自动）
-
-成长中心连登档位（连续登录 7/14/28 天）兑换后发放积分 / 能量 / 补签卡 / **抽奖次数**，抽奖次数只能从兑换获得。网关把它挂在每日签到排程末尾自动跑闭环（见[定时任务](#定时任务)）：档位解锁当天自动兑换、有抽奖次数自动抽完，全程无需人工盯。
+> 上游 Go 版的「连登档位兑换 + 抽奖次数自动抽完」**本分支没有移植**——Python 侧代码里不存在兑换 / 抽奖逻辑，需要兑换请到官网手动操作。
 
 ## 🆚 与上游的差异
 
-本分支相对 [上游 master](https://github.com/Sliverkiss/workbuddy2api) 的增量（均已在真实多账号环境验证）：
+本分支相对 [上游 master](https://github.com/Sliverkiss/workbuddy2api) 的增量（Python 重写 + 自研面板 + 桌面端工具链，均已在真实多账号环境验证）：
 
 ### 新增
 
 | 能力 | 说明 |
 |---|---|
-| **Web 管理面板** | `internal/panel`，前端 go:embed 单文件进二进制，零外部依赖。账号池可视化（健康色条 / 积分量条 / 冷却倒计时）、积分到期分布、单号运维、批量任务、日志查看、明暗主题 |
-| **请求指标与脱敏日志** | 面板展示完成成功率 / HTTP 成功率 / 平均耗时 / 最近请求，响应带 `X-Request-Id`；JSONL 只归档请求元数据，不写提示词、响应正文或凭证 |
-| **浏览器内 OAuth 添加账号** | 面板「添加账号」按钮完成设备授权 → 凭证落盘 → **热加载进池（免重启）** |
-| **在线配置编辑（热生效）** | 面板直接改 `config.json`：API 密钥 / `soft_rate` / 脱敏开关 / 池参数 / 任务排程**立即生效**；装配期字段（listen 等）保存后提示需重启。写入采用深合并 + 原子替换，保留未知键 |
-| **积分任务体系** | 任务列表 / 接受 / 领取接口 + 面板弹窗；「一键完成」覆盖 **17 个任务**（对话 / 领养 / 桌面行为链 / 模板 / 灵感案例 / 画布 / 专家召唤 / 技能尝鲜 / 主题 / 资料库 / 夜猫子等），推进进度、等待异步计分落定后**自动领奖**，纯 API 零客户端依赖 |
-| **首启自动生成配置** | 目录下无 `config.json` 时自动生成推荐配置（含 `crypto/rand` 随机 `api_key`），双击即开 |
-| **粘性会话内容回退** | 客户端不发 `conversation_id` 时，用 `system + 首条 user` 哈希派生会话键（`d-` 前缀），通用 OpenAI 客户端也能享受粘性 |
-| **余额后台刷新** | `schedule.balance_refresh_minutes`（默认 5）周期查余额并更新池，冷却账号余额恢复自动解冻 |
-| **模型能力透出** | `/v1/models` 附带 `supported_efforts` / `default_effort` / 积分倍率 / 输入输出上限等上游真实字段 |
-| **安全加固** | 常量时间密钥比较（`internal/httpauth`）、CSP 与安全响应头、UID 白名单防路径穿越、前端属性转义修复 |
+| **统一面板（自研 WebUI）** | `static/` 的 `index.html` + `app.css` + `app.js`，由网关在 `http://127.0.0.1:7863/panel/` 直接托管：**11 个视图**（概览 / 账号池 / 账号管理 / 模型 / Token 统计 / 积分统计 / 任务中心 / 实时日志 / 诊断 / 签到日志 / 设置）。无构建步骤、无 CDN 依赖，改完刷新页面即生效 |
+| **移动端（PWA + 安卓外壳）** | 响应式布局（≤900px 侧栏变抽屉 + 五格底栏，≤520px 单列）；`static/manifest.webmanifest` + `static/sw.js` 支持「添加到主屏幕」；另附 `android-app/` WebView 外壳工程（`build_apk.bat` 打包） |
+| **用量统计** | `data/usage.json` 按小时分桶，Token 统计页给出堆叠柱 + 请求数双轴趋势图，以及「按模型 / 客户端 / 区域 / 账号」四张表与 User-Agent 排行 |
+| **浏览器内 OAuth 添加账号** | 面板「账号管理」页扫码完成设备授权 → 凭证落盘 `auths/` → **热加载进池（免重启）** |
+| **桌面快照发现导入** | 扫描桌面上的 `login_state_*.json` / `identity_*.json`，判定「可导入 / 只有网页 Cookie / 仅身份信息」，可一键导入 |
+| **积分任务体系** | 任务目录 + 扫描进度 + 一键完成 + 账号保活 + 演练模式（`dry_run` 只演练不发请求）；纯 API 零客户端依赖 |
+| **签到与收益账本** | 每日错峰签到、补签、强制重签、演练；每账号签到状态 + 按日收益账本（签到积分 / 任务完成 / 领奖明细） |
+| **积分采集与实时日志** | `wb_credits_fetcher.py`（Playwright）抓取积分 / 能量并生成 HTML 报表；面板「实时日志」页可启停采集进程并原地跟读输出 |
+| **模型能力透出** | `/v1/models` 附带上下文窗口 / 最大输出 / 图片能力 / 推理档位等字段（目录里没证据的一律不声明） |
+| **可接入 DSH** | 网关实现 OpenAI 兼容协议，已注册为 DSH 的模型路由 `workbuddy-manager`（见[接入 DSH](#接入-dsh把本网关当成-dsh-的模型供应商)） |
+| **安全边界** | `auths/` 明文凭据由 `.gitignore` 排除；uid 白名单校验防路径穿越（`wb_auth.py`）；面板与 `/panel/api/*` 同一 Bearer 鉴权（`wb_gateway.py:1365`） |
+| **诊断页** | `wb_ops.run_checks()`：Python 版本 / 网关连通性 / 依赖 / 文件四项自检，面板「诊断」页一键出结果，并回显原始信息 |
 | **领养前置修复** | 上游 `travelAdopt` 缺 report 前置导致领养恒失败于 `first_buddy task not completed yet`；本分支修正后实测 +300 到账（3/3 账号） |
 
-### 同步上游
+### 与上游 Go 版的对应关系
 
-**第一轮（fork 基线 `53ee3a1` → `9a87758`，34 个提交）**：四类任务独立排程、pool 文件拆分、12153 连续计数才禁用、429 `code=6004` 模型级限流收窄、11101 不罚号、请求体 413、DeepSeek 思维链、reasoning_content 回填、Codex 指纹脱敏、系统提示词体系、出站 UA 可配等。
+上游是 Go 实现（`internal/*.go`），本分支是**Python 重写**：只保留「个人多账号自用」这条主线需要的能力，其余上游特性**没有移植**（代码里不存在，配置写了也不生效）。逐项对照：
 
-**第二轮（`9a87758` → `ea8b1e5`，2026-09-14，只吸收底层）**：
-
-| 上游改动 | 吸收内容 |
+| 上游 Go 版特性 | 本分支现状 |
 |---|---|
-| 净化增强 | `tool_calls.arguments` 盲区修复（content=null 的工具调用轮此前完全漏净化）、裸 `11128` 反探测改写、桌面版身份句（逗号形态）漏网修复、反馈句整句改写 |
-| 出站头族 | UA 对齐官方三段式 `WorkBuddy/<ver> WorkBuddy/<ver> CLI/<ver>`（默认 5.5.4/2.137.1，可配）；`X-IDE-*` 用量归属四头 + `X-Agent-Purpose`（`client_name` 配 `WorkBuddy` 即对齐官方桌面端）；`X-Device-Token` 设备风控头（auth 每号 / config / 文件三源）；`X-IDE-Version` 补齐 |
-| 并发修复 | 客户端 IP 改按请求参数传递（消除共享字段竞态）；billing 单段 UA 形态 |
-| 签到幂等 | `IsAlreadyCheckin` 识别"今天已签到"（code=10001/14001），调度日志不再把重复签到当失败 |
-| 粘性按模型判活 | 会话绑定的账号被 6004 模型级限额后，换模型请求自动解绑重分配（治"限额后换不动号"）；`/healthz` 探活计入模型豁免形态（治"全号被单模型限流探活误报 503"） |
-| report 增强 | `ReportChatActivity` 支持独立 `requestID`（同会话多轮上报各条可区分） |
+| 定时调度器（签到 09/21、猫猫旅行、活跃上报、token 保活、夜猫子） | **没有**。`main.py` 只做「建目录 → 起网关 → 起老控制台 → 开浏览器」；签到 / 任务 / 保活 / 采集全靠面板点按钮或手动跑脚本（`schedule.*` 是预留键，无读取者） |
+| 系统提示词体系（`prompt.mode` custom / append / passthrough） | **没有**。客户端 `messages` 原样转发；出站唯一的改写是「上游只接受流式」→ 强制 `stream: true`（wb_gateway.py:1764） |
+| 出站 UA / 指纹可配、请求体净化脱敏 | **没有**。UA 是代码内常量（wb_tasks.py:40-43），请求体不做净化 / 脱敏，`upstream.user_agent` 是死键 |
+| 错误码精细分类（`6004` 模型级限流、`11128` 反探测、`402` / `404` 分档、指数退避封顶） | **没有**。只有一条通用规则：HTTP 429 → 该账号计一次限流冷却；其它失败累加 `fail_count`，连续 3 次熔断（wb_gateway.py:304-324） |
+| `IsEnterprise` 判定（企业号跳过部分调用、额度换算） | **没有**。只把 `enterpriseId` 透传成请求体字段与 `X-Enterprise-Id` / `X-Tenant-Id`（wb_auth.py:124、wb_checkin.py:232） |
+| Redis（Upstash）状态镜像、成本分层探索、在途并发上限 | **没有**。池状态落 `data/state.json`；`upstash.*`、`pool.max_in_flight`、`pool.degrade_*`、`pool.cost_explore_interval` 都没有读取者 |
+| 「今天已签到」幂等识别 | **有**：HTTP 400 且 `code == 10001`，或 message 含「已签到 / 今天已签到」（wb_checkin.py:271） |
+| 桌面指纹事件上报（`X-IDE-*` / `X-Device-Token`） | **有**：仅任务链路使用，取值来自凭证文件里的 `device_token`（wb_tasks.py:187-188、678-680），不是配置项 |
+| 嵌入式 Go 面板 | **重写**：`static/` 下 `index.html` + `app.css` + `app.js`，11 个视图，由网关托管在 `/panel/` |
 
-未吸收（明确不做）：脚本体系（task_runner/school 脚本—我们已有更完整的纯 API 实现）、governance/CI workflow、成本账本选号（依赖 usage.credit 观测，收益待验证）。
-
-> 上游仓库此后已删除，上述第二轮（`ea8b1e5`）即其**删库前的最后一次更新**，本分支已完整吸收。此后本仓库与上游不再有同步关系，演进以本仓库为准。
+> 上游仓库已删除，fork 基线为删库前最后一次更新，本分支此后独立演进。本节对照的是**上游 Go 代码的能力清单**，不是本分支的实现说明；本分支真实行为以「核心行为语义」「API 端点」等章节与代码行号为准。
 
 ## 架构总览
 
 ```mermaid
 flowchart LR
-    Client["客户端 / SDK\nOpenAI 兼容请求"] --> H
+    Client["客户端 / SDK / DSH\nOpenAI 兼容请求"] --> H
 
-    subgraph GWI["WorkBuddy2API 网关 :7863"]
-        H["HTTP Handler\n鉴权 · 请求体上限 · 提示词改写 · 轮转"] --> P
-        H --> S
-        P["账号池\n快过期加权 · 成本分层 · 熔断 · 冷却 · 租约"] --> U
-        S["会话粘性路由"] -.绑定镜像.-> REDIS
-        T["定时调度\n签到 09/21 · 旅行 09/21 · 活跃 10 · 保活 22"] --> P
-        U["上游 Client\nChatHTTP 流式 · 短 RPC"]
+    subgraph GW["wb_gateway.py · HTTP 网关 127.0.0.1:7863"]
+        H["do_GET / do_POST\nBearer 鉴权 · 路由分发"] --> P
+        H --> PANEL["static/ 面板托管\n/panel/ · /panel/static/* · /panel/sw.js"]
+        P["AccountPool\n四策略选号 · 粘性会话 · 冷却 / 熔断"] --> U
+        U["上游调用\nchat/completions(SSE) · billing / auth / growth"]
     end
 
-    P -. "读凭证 (0600)" .-> AUTH[("auths/*.json")]
-    P -. "状态镜像" .-> REDIS[("Upstash Redis\n可选")]
-    U -->|"chat/completions (SSE)"| CB["CodeBuddy\ncopilot.tencent.com"]
-    U -->|"billing / auth / growth"| CB
+    P <--> ST[("data/state.json\n当前账号 · 粘性绑定 · 计数")]
+    P --> AU[("auths/*.json\nOAuth 凭证")]
+    U --> CB["CodeBuddy / WorkBuddy\ncopilot.tencent.com · codebuddy.cn · workbuddy.cn"]
+    GW --> US[("data/usage.json\nToken 用量")]
+    MAIN["main.py\nensure_dirs → 起网关 → 起老控制台"] --> GW
+    MAIN --> OLD["wb_webui.py 老控制台 :8789\n302 → /panel/（/api/* 与 /legacy 保留）"]
 ```
 
-上游请求在出站前经历统一的改写管线（`internal/upstream/payload.go`）：强制 `stream:true`、`developer` 角色归一、tool_choice 归一、`image_url` 字符串兼容为 OpenAI 对象形态、DeepSeek 思维链注入、`reasoning_effort` 档位降级、`reasoning_content` 回填、指纹脱敏。
+三条主线：
+
+- **网关**（`wb_gateway.py`，`127.0.0.1:7863`）：鉴权 → 选号 → 转发上游 → 记录用量；同时托管 `static/` 面板（`/panel/`）。
+- **统一面板**（`static/index.html` + `app.css` + `app.js`）：11 个视图，数据全部来自网关的 `/panel/api/*` 与 `/api/*`；手机浏览器可「添加到主屏幕」（PWA：`manifest.webmanifest` + `sw.js`）。
+- **老控制台**（`wb_webui.py`，`127.0.0.1:8789`）：根路径 302 跳到统一面板，只保留 `/api/*` 数据接口与 `/legacy` 兜底旧界面。
+
+出站请求**没有改写管线**：上游只接受流式，所以网关把 `stream` 强制成 `true`（`up_body["stream"] = True`，wb_gateway.py:1764）；客户端要非流式时由本地 `aggregate_sse_completion` 把 SSE 聚合成一个响应（wb_gateway.py:1084）。没有提示词改写 / 角色归一 / 指纹脱敏，没有 Redis，也没有定时调度器（`schedule.*` 只是预留，见「核心行为语义」）。
 
 ## 快速开始
 
@@ -225,7 +198,7 @@ flowchart LR
 ### 方式一：Windows 一键启动（推荐）
 
 1. 双击项目根目录的 **`一键启动.bat`**（脚本会自动探测已安装的 Python，找不到会给出安装提示）。
-2. 控制台会依次打印网关、面板、WebUI 三个入口 URL，然后自动在默认浏览器打开 WebUI 控制台。
+2. 控制台会打印统一面板与网关两个入口 URL，然后自动在默认浏览器打开**统一面板** `http://127.0.0.1:7863/panel/`（带 `#key=` 片段，免手输密钥）。
 3. 保持这个命令行窗口打开，WorkBuddy 才在工作；关闭窗口或按 `Ctrl+C` 即停止。
 
 ### 方式二：命令行启动（跨平台通用）
@@ -235,456 +208,305 @@ flowchart LR
 git clone https://github.com/H51806/WorkBuddy_-.git
 cd WorkBuddy_-
 
-# 2) 启动（会同时拉起网关 + WebUI，并自动打开浏览器）
+# 2) 启动（会拉起网关，面板由网关托管；同时线程起老控制台 8789，打开浏览器直达面板）
 python main.py
 ```
 
-`main.py` 内部动作：`ensure_dirs()` 建 `wb_data/` → `subprocess.Popen([sys.executable, "-u", "wb_gateway.py"])` 起网关（`127.0.0.1:7863`）→ `ThreadingHTTPServer(("127.0.0.1", 8789), WebUIHandler)` 起 WebUI → 延迟 1.5 秒 `webbrowser.open`。
+`main.py` 内部动作：`ensure_dirs()` 建 `wb_data/` → `subprocess.Popen([sys.executable, "-u", "wb_gateway.py"])` 起网关（`127.0.0.1:7863`，面板静态资源也由它提供）→ `ThreadingHTTPServer(("127.0.0.1", 8789), WebUIHandler)` 起老控制台（只保留 `/api/*` 数据接口与 `/legacy` 兜底）→ 延迟 1.5 秒 `webbrowser.open(统一面板 URL)`。
 
-### 三个入口 URL
+### 三个入口 URL（统一面板 · API 网关 · 老控制台）
 
-启动完成后浏览器会打开控制台；也可以直接访问：
+启动完成后浏览器会直接打开**统一面板**；也可以直接访问：
 
 | 入口 | URL | 说明 |
 |---|---|---|
-| **网关** | `http://127.0.0.1:7863` | OpenAI 兼容 API 端点（`/v1/chat/completions` / `/v1/models` / `/status` / `/healthz`） |
-| **网关面板** | `http://127.0.0.1:7863/panel/` | 上游 Go 项目留下的简易面板，本项目主要用 WebUI 控制台，此面板做兜底 |
-| **WebUI 控制台** | `http://127.0.0.1:8789` | 本项目自研的管理控制台：账号池 / 实时余额 / 一键换号 / 任务日志 / 报表下载 |
+| **统一面板（唯一界面）** | `http://127.0.0.1:7863/panel/` | 本项目自研的静态管理面板（`static/` 下 index.html + app.css + app.js，11 个视图）；支持手机浏览器「添加到主屏幕」当 PWA 用；URL 带 `#key=<api_key>` 可跳过密钥输入 |
+| **网关（API）** | `http://127.0.0.1:7863` | OpenAI 兼容 API 端点（`/v1/chat/completions` / `/v1/models` / `/status` / `/healthz`） |
+| **老控制台** | `http://127.0.0.1:8789` | 打开即 **302 跳到统一面板**（带密钥片段）；`/api/*` 数据接口仍保留（老脚本/自检可用），`/legacy` 可打开旧界面兜底 |
 
 ### 添加账号（登录）
 
-打开 WebUI 控制台 `http://127.0.0.1:8789` → 左侧「账号池」→ 右上角「**添加账号**」按钮：
+打开统一面板 `http://127.0.0.1:7863/panel/` → 左侧「**账号管理**」→ 点「**扫码登录（国内版 / 国际版）**」，或走「设备授权登录」：
 
 1. 浏览器自动打开 CodeBuddy 设备授权页；完成登录（邮箱 / 手机号 / QQ / 微信，任选）。
-2. 授权回调后凭证以 JSON 形式落盘到 `auths/workbuddy-<uid>.json`（`0600` 权限）。
-3. 网关**热加载**新账号进池，无需重启；同时触发一次首次签到把当天的 credits 领出来。
+2. 凭证写盘到 `auths/workbuddy-<uid>.json`（临时文件 + `replace` 原子替换；**没有做权限加固**，请自行保证 `auths/` 目录不被他人读取）。
+3. 网关**热加载**新账号进池（`load_auths()`），无需重启。登录成功只做这一步，**不会**顺带签到——要签到请到面板「签到日志」页点按钮。
 
-已过期 / Session 失效的账号可在同一个「账号池」面板里点「**重新登录**」走相同流程覆盖凭证。
+凭证过期 / 会话失效时，在「账号管理」页重新扫码覆盖，或点「刷新 Token」「重载账号」。
 
 ### 编辑 API Key
 
-WebUI「设置」→ 修改 `GATEWAY.api_key` 并保存；也可直接编辑 `config.py` 顶部：
+运行时真正被读取的是 **`config.json`**（根目录同名 `config.py` 里的常量网关**不读**）：
 
-```python
-GATEWAY = {
-    "port": 7863,
-    "api_key": "sk-CHANGEME-please-set-your-own-key",  # ← 改这里
+```json
+{
+  "listen": ":7863",
+  "api_key": "sk-你的密钥",
+  "auth_dir": "./auths",
+  "state_file": "./data/state.json"
 }
 ```
 
-改完 `api_key` 需要重启网关（`Ctrl+C` 再 `python main.py`），WebUI 内其它字段的修改即时生效。
+- 改完 **重启网关**（`Ctrl+C` 再 `python main.py`）才生效：`api_key` 在启动时读进模块级变量（wb_gateway.py:489），`POST /panel/api/config` 虽然会把请求体落盘，但不会热生效。
+- 面板「设置」页的「API Key」输入框是**面板用来访问网关的那把密钥**，只存在本机浏览器 `localStorage`（URL 带 `#key=…` 也会写进去）；它和服务端的 `api_key` 是两回事，两边填同一个值才连得上。
 
 ### 验证
 
 ```bash
 # 模型列表
 curl -s http://127.0.0.1:7863/v1/models \
-  -H "Authorization: Bearer sk-你的-api-key"
+  -H "Authorization: Bearer <你的 api_key>"
 
-# 账号状态（汇总 + 每账号详情，disabled 账号透出 disabled_reason）
+# 账号状态（汇总 + 每账号详情 + 当前策略）
 curl -s http://127.0.0.1:7863/status \
-  -H "Authorization: Bearer sk-你的-api-key"
+  -H "Authorization: Bearer <你的 api_key>"
 
-# 健康检查（无可用账号时返回 503）
+# 健康检查（免鉴权，恒 200）
 curl -s http://127.0.0.1:7863/healthz
+
+# 实时余额（?refresh=1 绕过 30 秒缓存）
+curl -s "http://127.0.0.1:7863/api/credits/live?refresh=1" \
+  -H "Authorization: Bearer <你的 api_key>"
 
 # 流式聊天
 curl -sN http://127.0.0.1:7863/v1/chat/completions \
-  -H "Authorization: Bearer sk-你的-api-key" \
+  -H "Authorization: Bearer <你的 api_key>" \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":true}'
 
-# 非流式聊天（本地聚合为单响应）
+# 非流式聊天（本地把 SSE 聚合为单响应）
 curl -s http://127.0.0.1:7863/v1/chat/completions \
-  -H "Authorization: Bearer sk-你的-api-key" \
+  -H "Authorization: Bearer <你的 api_key>" \
   -H "Content-Type: application/json" \
   -d '{"model":"deepseek-v4-flash","messages":[{"role":"user","content":"hi"}],"stream":false}'
 ```
 
+面板入口可以直接带上密钥：`http://127.0.0.1:7863/panel/#key=<你的 api_key>`。
+
 ## 配置说明
 
-**`config.example.json` 是配置项最完整的参考**：每个字段、默认值与结构都能在其中找到，示例值一律是 `test_key` 之类占位符，**不含任何真实密钥**。下表为字段含义速查。
+**`config.json` 是运行时真正读取的配置文件**；`config.example.json` 是可复制的模板，只含下面这些**真正生效**的字段，示例值一律是占位符，**不含真实密钥**。表中没有列出的键（上游 Go 版遗留的 `schedule.*`、`prompt.*`、`upstash.*`、`session_sticky.*`、`pool.max_in_flight`、`pool.degrade_*`、`server.read_timeout`、`logging.*`、`upstream.header_timeout_seconds` 等）Python 版**不读取，写了也不生效**。
 
 ### 字段速查
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| `listen` | `:7863` | HTTP 监听地址 |
-| `api_key` | 空 | 网关鉴权密钥；**空 = 不鉴权直接放行**（公网必须设置） |
+| `listen` | `:7863` | 监听地址（默认 `127.0.0.1:7863`）；要局域网访问得写 `0.0.0.0:7863`，并务必设置 `api_key` |
+| `api_key` | `sk-default-key-change-me` | Bearer 鉴权密钥；**空字符串 = 不鉴权直接放行**。配置文件不存在时按 `DEFAULT_CONFIG` 自动创建（wb_gateway.py:60-92） |
 | `auth_dir` | `./auths` | 账号凭证目录 |
-| `state_file` | `./data/state.json` | 账号池状态持久化文件 |
-| `server.read_timeout` | `300s` | 入站请求读取（含 body 上传）总时长上限；大上下文/文件块经反代转发超时会 400 `read body: i/o timeout`；`0` = 不限制；改动需重启（#100） |
-| `panel.package_detail_limit` | `5` | 积分构成页单账号默认展示的最早到期包数；其余未用完包与已用完包聚合折叠 |
-| `logging.request_archive_enabled` | `true` | 请求元数据 JSONL 归档开关；不记录提示词、响应正文或 Authorization |
-| `logging.request_retention_days` | `7` | 请求归档保留天数；超期文件在启动和周期清理时删除 |
-| `logging.request_archive_max_mb` | `100` | 请求归档总容量上限（MiB）；超限优先删除最旧文件 |
-| `cooldown.soft_rate` | `600s` | 软限流（429 / 限流文案）冷却基数；同一账号连续触发按 2 倍指数退避 |
-| `cooldown.soft_rate_max` | `2h` | 软冷却指数退避封顶 |
-| `schedule.checkin_hours` | `[9, 21]` | 每日本地时区整点签到 + 余额查询解冻。空数组 / `null` = 未配置回落默认（不是禁用） |
-| `schedule.travel_hours` | `[9, 21]` | 每日本地时区整点推进猫猫旅行状态机（领养 / 派出 / 领奖） |
-| `schedule.activity_hours` | `[10]` | 每日本地时区整点对话活跃上报（点亮连登 + 解锁 `first_buddy`） |
-| `schedule.keepalive_hours` | `[22]` | 每日本地时区整点刷新 token 保活 |
-| `schedule.blackcat_hours` | `[23]` | 每日本地时区整点夜猫子补足（23:00–08:00 计数窗口） |
-| `schedule.checkin_enabled` | `true` | 签到总开关；`false` 真正关闭 |
-| `schedule.travel_enabled` | `true` | 猫猫旅行总开关（独立于签到） |
-| `schedule.activity_enabled` | `true` | 活跃上报总开关 |
-| `schedule.keepalive_enabled` | `true` | token 保活总开关 |
-| `schedule.blackcat_enabled` | `true` | 夜猫子总开关 |
-| `schedule.include_disabled_in_tasks` | `false` | 让**保号类**四任务（签到 / 活跃上报 / token 保活 / 余额刷新）对**已禁用**账号也执行——「禁用」只关选号，不停保号。`false`（默认）保持「禁用的跳过」 |
-| `upstream.timeout_seconds` | `120` | 短 RPC（刷新 / 签到 / 余额 / 模型列表）总时长上限 |
-| `upstream.header_timeout_seconds` | 回落 `timeout_seconds` | 聊天首字节前（响应头）上限 |
-| `upstream.idle_timeout_seconds` | `300` | 聊天流中空闲上限（活跃续命，静默断流） |
-| `upstream.user_agent` | 空 | 出站 User-Agent 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`）。官网「使用端」列按出站 UA 服务端归因；官方 WorkBuddy 桌面 UA 为 `WorkBuddy/<version>`，需要时可配 |
-| `features.sanitize_blacklist_fingerprints` | `true` | 出站请求体黑名单指纹脱敏 |
-| `prompt.mode` | `custom` | 系统提示词模式：`custom` = 网关用自有提示词替换客户端 system；`append` = 开头连续 system/developer 块后插网关提示词（既有消息逐字不动）；`passthrough` = 透传客户端原始 system（降级重试仍切中性提示词） |
-| `prompt.file` | 空 | 提示词文件路径；空 = 内置默认（约 2KB）；路径非空但不可读 → 启动报错 |
-| `upstash.url` / `upstash.token` | 空 | 空 = 纯内存模式（Noop 降级，功能照常） |
-| `pool.max_in_flight` | `3` | 单账号最大在途请求数（`0` = 不限） |
-| `pool.max_in_flight_global` | `2` | global 域单账号在途上限（国际版 WAF 风控更紧，压低并发） |
-| `pool.degrade_threshold` | `5` | 连败降权阈值：未知错误（ErrClient/传输层）连败 N 次临时出池 |
-| `pool.degrade_cooldown` / `pool.degrade_cooldown_max` | `10m` / `2h` | 连败降权时长与上限钳制 |
-| `pool.cost_explore_interval` | `30m` | costTier 条件探索窗口：免费层垄断且存在未知号时，每窗口把一个真实请求搭车改道给未知号（零新增上游请求；成功即毕业，失败走既有错误策略）。`0` = 关停 |
-| `pool.credit_floor` | `100` | **积分保底**：账号余额低于该值时，对**实测收费**模型（tier 2，账本 6h 内有效观测）不再参与选号——防止收费模型把余额打穿、连免费模型都 402 冷却到次日签到（最坏约 11.5 小时不可用）。tier 0（实测免费）/ tier 1（无观测）**不受限**：保底保的是「留余额给免费模型用」，且 tier 1 若拦会让账本过期 / 重启清零的触底号死锁在「学不回来」。含会话粘性路径（粘性号触底则解绑换号）。全池触底且全 tier 2 时选号返回空（网关回 503），**不放行**。签到回血越过 floor 即刻自动恢复。`0` = 关闭 |
-| `pool.breaker_threshold` | `3` | 连续失败触发熔断阈值 |
-| `pool.breaker_cooldown` | `30m` | 熔断基础退避时长 |
-| `pool.breaker_cooldown_max` | `6h` | 熔断指数退避封顶 |
+| `state_file` | `./data/state.json` | 账号池状态（当前账号、粘性绑定、请求计数） |
+| `upstream.base_url` | `https://copilot.tencent.com` | 聊天上游基地址；优先级 `upstream.base_url` > `global.chat_base` > 内置常量（wb_gateway.py:1064-1071） |
+| `global.chat_base` | 空 | 上一行的兜底 |
+| `upstream.timeout_seconds` | `120` | 上游请求超时；**聊天流与短 RPC 共用同一个值**（wb_gateway.py:1788） |
+| `models.file` | `./data/models.json` | 模型目录文件（手工覆盖 / 上游发现落在这里）；文件不存在就用内置 16 个模型 |
+| `usage.enabled` | `true` | Token 用量统计开关 |
+| `usage.file` | `./data/usage.json` | 用量数据文件 |
+| `usage.retention_days` | `90` | 用量保留天数 |
+| `usage.flush_interval_seconds` | `5` | 用量落盘间隔（秒） |
+| `pool.distribution` | `priority` | 分配策略：`priority` / `round-robin` / `balanced` / `sticky`（别名如 `rr`、`lru`、`sticky-session` 见 wb_pool_policy.py:57） |
+| `pool.region` | 空 | 区域过滤：空或 `merged` = 国内外混合；`cn` / `global` = 只用该区账号 |
+| `pool.credit_floor` | `0`（示例 `100`） | 积分保底：余额低于该值的账号不再参与选号（`0` = 关闭） |
+| `pool.prefer_expiring` | `true` | 快过期积分软加权（弱于会话粘性与所选策略本身） |
+| `pool.expiring_soon` | `168h` | 快过期加权窗口（`0` = 关闭） |
 | `pool.idle_weight_per_hour` | `0.5` | 闲置补偿：每小时未使用 +0.5 权重 |
-| `pool.idle_weight_max` | `5.0` | 闲置补偿权重封顶 |
-| `pool.prefer_expiring` | `true` | 快过期积分加权：窗口内仍有有效快过期批次的账号，选号权重 ×3（虚拟实例）；不按到期时间排序、与批次金额无关；是软偏好，弱于会话粘性与模型成本分层（#101） |
-| `pool.expiring_soon` | `168h` | 快过期加权窗口：仅窗口内仍有有效批次的账号命中上述 ×3；窗口开大 → 命中账号变多、偏好被稀释；留空或 `0` 关闭 |
-| `session_sticky.enabled` | `true` | 会话粘性路由开关 |
-| `session_sticky.ttl` | `30m` | 会话绑定 TTL（滚动续期） |
-| `session_sticky.gc_interval` | `5m` | 过期绑定 GC 周期 |
+| `pool.idle_weight_max` | `5.0` | 闲置补偿权重上限 |
+| `pool.breaker_threshold` | `3` | 连续失败触发熔断的阈值 |
+| `pool.breaker_cooldown` | `30m` | 熔断冷却时长 |
+| `cooldown.soft_rate` | `600s` | 被上游 429 判定限流后，该账号的冷却时长 |
 
-### 上游超时语义（三段各归其位）
+### 上游超时
 
-| 字段 | 作用对象 | 默认 | 行为 |
-|---|---|---|---|
-| `timeout_seconds` | 短 RPC（token 刷新 / 签到 / 余额 / 模型列表） | `120` | 总时长硬上限，到期报错走换号 / 熔断 |
-| `header_timeout_seconds` | 聊天 SSE **首字节前** | `120` | 由 `Transport.ResponseHeaderTimeout` 约束；超时 = 换号重发 |
-| `idle_timeout_seconds` | 聊天 SSE **流中空闲** | `300` | 活跃吐数据续命不掐；静默超时才断流释放租约 |
+| 字段 | 默认 | 作用范围 |
+|---|---|---|
+| `upstream.timeout_seconds` | `120` | 上游 HTTP 请求的超时；**短 RPC（刷新 / 签到 / 余额 / 模型列表）与聊天流共用这一个值**（wb_gateway.py:1788） |
 
-聊天流（`stream` true / false 均同）**没有总时长上限**：聊天使用 `Timeout=0` 的专用 client，长思考 / 长输出不会被掐断。
+没有「首字节前 / 流中空闲」两级超时，也没有「聊天流不设总时长上限」：长思考会话若持续 120 秒无数据同样会超时。要放宽就调大这一个值。
 
-### 环境变量覆盖
+### 环境变量
 
-加载顺序：JSON 文件 → `WB2A_*` 环境变量（变量非空才覆盖）：
+Python 版**只读一个**环境变量：
 
-`WB2A_LISTEN` · `WB2A_API_KEY` · `WB2A_AUTH_DIR` · `WB2A_STATE_FILE` · `WB2A_MAX_BODY_MB` · `WB2A_SOFT_RATE`(duration) · `WB2A_SOFT_RATE_MAX`(duration) · `WB2A_TIMEOUT_SECONDS` · `WB2A_HEADER_TIMEOUT_SECONDS` · `WB2A_IDLE_TIMEOUT_SECONDS` · `WB2A_USER_AGENT` · `WB2A_SANITIZE_FINGERPRINTS`(bool) · `WB2A_PROMPT_MODE` · `WB2A_PROMPT_FILE`
+| 变量 | 作用 |
+|---|---|
+| `WORKBUDDY_DATA_DIR` | 把 `data/` 目录换到别处（wb_models.py:35、wb_usage.py:41）；未设置时用 `<项目目录>/data` |
+
+其余配置一律走 `config.json`。上游 Go 版的 `WB2A_*` 系列变量（`WB2A_LISTEN` / `WB2A_API_KEY` / `WB2A_MAX_BODY_MB` / `WB2A_PROMPT_MODE` …）在本分支**不存在**，设置了也不会生效。
 
 ## 核心行为语义
 
-### 系统提示词体系
+### 请求转发（`POST /v1/chat/completions`）
 
-客户端（Claude Code / Codex 等 CLI）会在 system prompt 注入固定模板句，上游内容审核按**逐字精确匹配**误杀合法流量（HTTP 400 + 审核文案）。网关提供两层防护，互不替代：
+- 上游地址：`upstream.base_url` > `global.chat_base` > 常量 `https://copilot.tencent.com`；国内版真实路径是 `/v2/chat/completions`（`wb_gateway.py` 的 `chat_upstream_url()`），超时默认 `upstream.timeout_seconds = 120`。
+- **对上游永远发 `stream=true`**（`wb_gateway.py:1764`）：上游只接受流式，非流式实测直接 400 `code=11101`。客户端要非流式时，网关把 SSE 聚合后返回普通 completion。
+- 模型名兜底：`resolve_model(请求里的 model, pool.region)`——未知、被隐藏、跨区的模型一律换成兜底模型，并在日志里记一行 `模型 X -> Y（原因）`。
+- 没有可用账号时返回 **503**，文案是 `No available accounts: <账号名(原因)>`。
+- 鉴权走 `api_key`（`Authorization: Bearer <key>`）；`api_key` 为空则完全不校验。`/healthz` 免鉴权。
 
-1. **提示词体系**（解决 **system / developer 来源**的误报）：由 `prompt.mode` 控制
-2. **指纹脱敏**（兜底 **用户 / assistant 消息**里的指纹串）：由 `features.sanitize_blacklist_fingerprints` 控制
+### 账号池分配策略
 
-| 模式 | 语义 |
-|---|---|
-| `custom`（默认） | 出站前用网关自有提示词**替换**客户端 system / developer 消息（删除全部 system / developer，头部插入单条 system）；user / assistant / tool 消息逐字不动 |
-| `append` | 开头连续 system / developer 块之后**插入**一条网关自有 system，既有消息（含客户端项目规范/工具约定）逐字不动——两者并用；降级期退化为 replace（带指纹原文重试只会确定性再撞 400） |
-| `passthrough` | 透传客户端原始 system，不做改写 |
+`pool.distribution` 四选一，面板「账号池」页可切换并落盘：
 
-内置默认提示词约 2KB（`internal/prompt/defaultprompt.md`，嵌入二进制）。`prompt.file` 指向自定义提示词文件（自定义人格 / 人设）即整体替换内置默认；**留空 = 内置默认**，路径非空但不可读 → **启动报错**（fail fast，不会静默回落到内置默认）。
+| 策略 | 面板名 | 语义 |
+|---|---|---|
+| `priority`（默认） | 先用完一个 | 固定一个号，用尽或被熔断才换——减少积分同时过期的损失 |
+| `round-robin` | 顺序轮换 | 按账号 id 排序轮着来，负载平均摊开 |
+| `balanced` | 均衡分配 | 闲置越久权重越大，随机但偏向冷号 |
+| `sticky` | 对话粘性 | 一个对话固定一个账号，保住上游 prompt 缓存 |
 
-### 内容拦截误报与降级重试
+候选筛选（`wb_pool_policy.scope`）：停用（`active=false`）、熔断中、软冷却中的号直接排除；`pool.region` 非空时只留该区域的号（`""`/`merged` = 跨区混池，区域由凭据域名判断：含 `workbuddy.ai` = 国际版）；`pool.credit_floor` 以上的号才参与（积分低于下限的号会被判「积分不足」）。
 
-`passthrough` 模式请求被上游内容策略拦截（HTTP 400 + `blocked by security policy` / `unapproved channel` / `illegal api invocation` 文案）时，判定为 system 指纹误报：**同请求内**换 Degraded 中性提示词重试一次；第二次仍被拦（用户内容本身触发审核）→ 走既有错误路径返回客户端，并如实报给调用方。
+排名规则：
 
-- 触发降级后持续到**次日 00:00 CST**（Asia/Shanghai）重置；降级期内 `passthrough` 请求直达中性提示词，不再先撞 400
-- 降级状态是**进程内存态**，重启清零
-- 内容问题非账号问题：`ErrContentBlocked` 不罚账号（无冷却 / 熔断 / 计错），由网关降级重试消化
+- `priority`：`last_used` 最近的排最前（把流量压在一个号上直到它不可用）；全新号（`last_used=0`）退化为「积分多的优先」，这样挑中的号能撑更久。
+- `round-robin`：按 `account_id` 排序后用游标 `cursors['策略|区域']` 轮换，游标随 `data/state.json` 持久化。
+- `balanced`：加权随机，`weight = clamp(闲置小时 × pool.idle_weight_per_hour, 1.0, pool.idle_weight_max)`，从未使用过给满分 `idle_weight_max`。
+- `pool.prefer_expiring = true`（默认）时先做一次「快过期优先」的软排序：`credits_expire_at` 落在 `expiring_soon` 窗口内的号排前面，其余按到期时间升序。
 
-### 错误分类与账号处置
+选号结果带原因（面板「派活顺序预览」会显示）：`sticky-hit` / `sticky-new` / `priority` / `round-robin` / `balanced` / `current`（面板显式切换的号）/ `fallback` / `empty`（无候选 → 503）。
 
-上游错误由 `Classify` 统一分类（判定优先级：余额耗尽 → session 失效 → 限流文案 → 状态码兜底），账号处置如下：
-
-| 分类 | 触发条件 | 账号处置 | 恢复 |
-|---|---|---|---|
-| 余额不足 | HTTP 402 / body 含余额关键词 | 硬冷却到**次日 04:00**（本地时区） | 签到（09/21 点）余额恢复自动解冻 |
-| 频控 | HTTP 429 / 限流文案（不限状态码） | 软冷却 `soft_rate`（600s 起，连续触发指数退避，封顶 `soft_rate_max`）。**`code 6004`（模型级）带「将在 … 重置」时**冷却到上游重置墙钟并豁免切模型（见[常见问题](#429-code6004模型级限流的冷却语义)） | 到期自动恢复 / 成功清零退避 |
-| Session 失效 | body 含 `Offline user session not found` / `12153` | **连续 3 次**才永久禁用（一次 12153 多为临时抖动：网络 / 闪断 / refresh 竞态）；刷新成功 / 任意成功 / 手工复活清计数 | 在 WebUI「账号池」对该账号点「重新登录」走一遍 OAuth 覆盖凭证 |
-| 上游 404 | HTTP 404 | 软冷却固定 60s（不随 `soft_rate`、不单独退避） | 到期自动恢复 |
-| 服务端错误 | HTTP ≥500 | 喂连续失败计数，达阈值熔断 | 熔断到期 / 成功清零 |
-| 请求体解析失败 | HTTP 400 + `Unmarshal chat params failed` / code `11101` | **不罚账号，但仍轮转**（客户端畸形 JSON，换号照样 400） | 即时 |
-| 内容拦截 | HTTP 400 + 审核文案 | **不罚账号**，`passthrough` 模式走降级重试 | 即时 |
-| 客户端错误 | 其余 4xx / 业务 `code≠0` | 不处罚，换号重试 | 即时 |
-
-请求体解析失败（`11101`）与内容拦截一样**不罚账号**：问题在请求内容而非账号健康。网关不做请求体截断与预拦截，`11101` 均为客户端发来的畸形 JSON。
-
-**熔断器**：所有冷却入口与 5xx 共用唯一连续失败计数器 `fails`；累计达 `breaker_threshold`（默认 3）触发熔断，退避 `breaker_cooldown × 2^retryCount`，封顶 `6h`；成功清零。
-
-**软冷却指数退避**（与熔断器并存的第二条升级线）：软限流的**冷却时长**本身也按连续次数退避——同一账号连续触发软冷却时 `soft_rate × 2^(连续次数-1)`，封顶 `soft_rate_max`。计数 `soft_streak` 独立于熔断器的 `fails`，只在**成功**或**签到解冻**时清零，随 `state.json` 持久化。
-
-### 选号策略
-
-1. 过滤：禁用 / 冷却 / 熔断 / 在途占满账号不参与
-2. 按模型实测成本分层，只保留当前最优层
-3. 默认开启快过期积分加权（软偏好，不改排序）：
-
-   - 在模型成本最优层内，`expiring_soon` 窗口内仍有有效快过期批次的账号，选号权重 ×3（`expiringVirtualSlots` 虚拟实例展开，会话粘性路径同口径）。
-   - 不按到期时间排序、与批次金额无关：14 天后到期与 3 天后到期、1 分与几千分，只要在窗口内待遇相同。
-   - 该偏好弱于会话粘性（绑定号健康则直接使用）与模型成本分层（按实测成本硬过滤）；已过期、零余额、无有效到期时间的账号不进入加权集。
-4. 同一候选池内加权随机（快过期命中账号在上面的基础上 ×3）：
-
-   `weight = credits 比例 ×10 + idleWeight`
-
-   - `credits 比例` = 该号积分 / 候选集最大积分
-   - `idleWeight` = `min(闲置小时 × idle_weight_per_hour, idle_weight_max)`，从未使用给满分
-5. 防惊群：跳过 100ms 内刚被选中的账号；全冷却时从非禁用、非余额耗尽的软冷却 / 熔断账号中选最早到期者顶班
+> 注意：`config.json` 里的 `pool.max_in_flight` 目前**没有被任何代码读取**——本分支没有并发/在途上限，也不会因此排除账号。
 
 ### 会话粘性
 
-同一会话尽量复用同一账号，多轮对话不跳号：
+- 会话键取请求体里的 **`user` 字段**（OpenAI 兼容协议的 `user`）：`session_id = request_data.get("user") or uuid4()`。请求里不带 `user` 时每次都是新会话，等效于不粘。
+- 绑定关系写进 `data/state.json` 的 `sticky_sessions` / `sticky_at`；绑定的号变不可用时自动解绑重挑；移除账号时会顺手清掉指向它的绑定。
+- 策略路径下粘性**没有 TTL**：只要绑定的号还可用就继续用。仅当 `wb_pool_policy` 缺失退回老逻辑时才用 1800 秒固定 TTL。
 
-- 会话键提取顺序：`metadata.conversation_id` → `metadata.conversationId` → `metadata.user_id` → 顶层 `conversation_id` → 顶层 `conversationId`（snake_case 优先于 camelCase）
-- TTL 滚动续期（默认 30m），GC 周期 5m；绑定可镜像到 Redis（7 天 TTL）防重启丢失
-- 请求失败自动解绑；成功后绑定跟随最终成功账号
+### 冷却、熔断与失败计数
 
-### 定时任务
+只有两条通用规则（没有区分上游错误码的专项处置）：
 
-五类任务各自独立排程、各有开关，互不影响。容器时区由 `TZ` 控制（compose 默认 `Asia/Shanghai`）。
+| 触发 | 处置 | 恢复 |
+|---|---|---|
+| 限流（被判定为 rate limit） | 软冷却 `acc.cooldown_until = now + cooldown.soft_rate`（默认 600s，`config.json` 现值见配置说明） | 到期自动恢复 |
+| 连续失败 `fail_count ≥ pool.breaker_threshold`（默认 3） | 熔断 `acc.breaker_until = now + pool.breaker_cooldown`（默认 1800s，`config.json` 现值 `30m`） | 到期自动恢复 |
 
-| 任务 | 开关（默认 true） | 时刻（默认） | 行为 |
-|---|---|---|---|
-| 签到 | `schedule.checkin_enabled` | `checkin_hours` `[9, 21]` 整点 | 签到 + 余额查询；余额恢复则解冻冷却账号。**末尾追加连登管家**（见下） |
-| 活跃上报 | `schedule.activity_enabled` | `activity_hours` `[10]` 整点 | 对话活跃上报（`chat_request_send` 事件，必须含 `userId`）；点亮连登 + 解锁 `first_buddy`；每号每天 1 次 |
-| 猫猫旅行 | `schedule.travel_enabled` | `travel_hours` `[9, 21]` 整点 | 独立排程：无猫领养 / `idle` 派出 / `arrived` 领奖 |
-| 保活 | `schedule.keepalive_enabled` | `keepalive_hours` `[22]` 整点 | 全账号刷新 token；session 失效**连续 3 次**才自动禁用 |
-| 夜猫子 | `schedule.blackcat_enabled` | `blackcat_hours` `[23]` 整点 | **先查任务进度再决定**：`black_cat` 未达标才在 23:00–08:00 计数窗口内补足 glm-5.2 短对话（每天 1 次累计 3 天，漏跑次日窗口自动补） |
+任意一次成功都会把 `fail_count` 清零。**没有** 402/404/`code=6004`/`11101` 的分类处置，**没有** 指数退避、软冷却封顶、硬冷却到次日、也**没有** Redis 镜像——上游错误的处理就是「记一次失败 + 上面的冷却」以及 `log.error` 打出上游返回的前 200 字节。
 
-#### 禁用账号与保号任务（`schedule.include_disabled_in_tasks`）
+### 定时与自动任务：本分支没有内置调度器
 
-缺省 `false`：禁用账号被上述**签到 / 活跃上报 / 保活 / 余额刷新**四任务跳过，与选号过滤一致。
+`main.py` 只做四件事：建目录 → `subprocess` 起网关（7863）→ 线程起老控制台（8789）→ 打开浏览器。`config.json` 的 `schedule.*` 与 `config.py` 的 `AUTOTASKS` 都是**预留字段，没有任何代码读取执行**。
 
-面板「禁用」的语义是「**不再参与选号**」，但这四类任务此前会一并跳过禁用号——被禁用的账号因此拿不到签到积分、不续 token、余额也不再刷新；而 `ReenableIfCredits` 明确不复活 disabled 账号，等于签到这条唯一的自动回血路径也断了，只能人工点「解冻」。
+所以：签到、任务中心、账号保活、积分采集全部是**面板点击触发**（或手动跑脚本），不存在后台定时签到、活跃上报、猫猫旅行之类的排程。面板顶栏的「实时」开关只是让页面自动刷新，不会向上游发起任何动作。
 
-如果采用「**一次只放开一个账号、用禁用做流量开关**」的轮换方式（同 IP 多号怕触发风控），闲置待命的号恰恰是最需要签到的——把它设为 `true`，禁用号仍会签到 / 保活 / 刷新余额，**但依旧不参与选号**（`pool` 选号侧的 disabled 过滤不受本开关影响）。
+### 实时余额
 
-> 该开关**只覆盖调度器的这四类任务**。猫猫旅行、夜猫子、连登管家（挂在签到末尾的 `RunStreakBonusNow`）与成长任务队列**仍按原样跳过禁用账号**——若也需要，请另行提出。
+`/status` 与面板的账号余额来自 `live_credits_cached()`：直接调上游 `/v2/billing/meter/get-user-resource` 累加各积分包的 `remain`，**30 秒缓存**。面板「强制刷新余额」走 `GET /api/credits/live?refresh=1` → `live_credits_force_refresh()`，绕过缓存立即查一次。不再需要跑采集器就能看到实时余额。
 
-#### 暂停选号（账号级 `paused`，无需配置）
 
-比上面的全局开关更常用的账号级入口：面板账号行的「**暂停选号**」按钮。暂停的账号：
+## 🖥️ 统一面板（本项目自研，`/panel/`）
 
-- **退出选号**（含全冷却兜底），状态显示「已暂停选号」，点「恢复选号」即刻回池——不清冷却域、无需解冻或重登；
-- **无条件照常保号**：签到 / 活跃上报 / 保活 / 余额刷新四任务照跑（不依赖 `include_disabled_in_tasks`）；
-- **其余任务体系照常**：猫猫旅行（纯 RPC：状态/派出/领奖）、连登管家、成长任务队列与任务中心扫描/执行都照常参与——这些走的是上报/领奖接口，不发模型对话（个别任务动作自带一次真实短对话，如 `Model_chat_GLM5.2`，影响可控）；失败照常记错误行，不特殊处理；
-- **唯一跳过的是夜猫子**：`RunNightChats` 逐条发真实 glm-5.2 对话，是任务体系中唯一「整任务都是模型对话」的，与「让位防风控」正面冲突。
+`static/` 下的三个文件（`index.html` / `app.css` / `app.js`）就是运行在 `http://127.0.0.1:7863/panel/` 的完整界面，由网关进程直接托管：没有构建步骤、没有 CDN 依赖，改完文件刷新页面即生效（响应带 `Cache-Control: no-store`）。
 
-这正是「一次只放开一个号、其余让位」轮换用法想要的粒度：让位的号不再承接**选号流量**，也避开夜间的对话补足；其余养号动作照常。与「禁用」的区别：禁用是终态（session/授权判死，需人工解冻，保号默认也停），暂停是运维临时态（账号健康，随时恢复）。状态持久化（state.json `paused` 字段），跨重启不丢；`disable`/`revive` 会一并清掉 `paused`。
+- 静态资源路由：`/panel/` 送 `static/index.html`（文件缺失时回退进程内嵌的旧面板）；`/panel/static/<file>` 送 `static/` 下的文件（已做路径穿越防护，只允许该目录内的文件）；`/panel/sw.js` 送 Service Worker（带 `Service-Worker-Allowed: /panel/`）。
+- 密钥：面板页面与 `/panel/api/*` 同一 Bearer 鉴权；进入方式 `http://127.0.0.1:7863/panel/#key=<api_key>`，老控制台与 `main.py` 的跳转都会自动带上这个片段。
 
-#### 企业版账号（自动识别，无需配置）
-
-`auth` 文件带非空 `enterpriseId` 的账号被识别为**企业版**（面板账号名旁显示「企业版」标签）。企业版**没有个人成长体系**——上游对这些端点一律拒绝（实测 2026-10-07，同一时刻与个人号 A/B 对照）：
-
-| 端点 | 企业版响应 |
-|---|---|
-| `POST /v2/billing/meter/daily-checkin`（签到） | `400 code 10001`「企业账号不支持该操作」 |
-| `POST /billing/meter/claim-gift` / `claim-compensation`（夜猫子领奖） | `400 code 10001` 同上 |
-| `GET /activity/growth/*`（连登 / 旅行 / 热力图 / 抽奖）与 `GET /v2/activity/growth/tasks`（成长任务） | `403`「growth system is only available for personal users」 |
-
-因此网关对企业号**不发起**这五类调用（签到 / 活跃上报 / 猫猫旅行 / 夜猫子 / 连登管家），面板也不渲染「签到」「任务」按钮（只留「额度」）。判定（`auth.Auth.IsEnterprise()`）与既有 `IsGlobal()`（D4 门控）在**同一批引用处并列书写**，`upstream` 侧零改动。
-
-**企业版照常的能力**：选号派发、保活（token 刷新仍必需——不刷新同样会过期失效）、额度查询。
-
-企业额度不在个人「资源包」体系内（`get-user-resource*` 对 `enterpriseId` 账号恒返回空 `Accounts`，面板因此长期显示 0），故额度改走 `POST /v2/billing/meter/get-enterprise-user-usage`：上游 `credit` 是**本周期已用**（与个人口径「剩余」语义相反），`limitNum` 是**分配给该账号的额度**，网关据此换算 `剩余 = limitNum - credit`；`limitNum = -1` 为不限量（面板显示「不限」，且不参与周期分桶）。企业配额按周期重置（`cycleResetTime`），未用完即作废，故周期末会参与 `prefer_expiring` 优先消耗。
-
-> 成员账号**无权查询企业池总额度**（实测：池端点在成员 token 下返回 `403 not_authorized`，`/console/accounts` 显示 `isAdmin=false`）。面板展示的只是**该账号被分配的额度**；企业池余额只有企业管理员在管理后台可见。
-
-#### 连登管家（签到排程末尾自动执行）
-
-成长中心的连登档位（连续登录 7/14/28 天）兑换后发放积分 / 能量 / 补签卡 / **抽奖次数**，抽奖次数只能从兑换获得。管家在每日签到后自动跑一遍闭环（幂等，未解锁静默跳过）：
-
-1. 查连登档位状态 → 已解锁（非 locked / 非 claimed）的档位自动**兑换**
-2. 查抽奖次数 → **有次数自动全部抽完**，奖品记日志（`streak-bonus <uid>: 🎲 …`）
-
-无需配置，跟随签到排程；到天数那天自动完成「兑换 → 抽奖」，无需人工盯。
-
-**关闭定时任务**：用 `schedule.*_enabled: false` 显式关闭（四个都设 `false` 则调度器不空转，直接阻塞等待退出信号）。注意两点语义：
-
-- **空数组与 `null` 表示「未配置 → 回落默认」**，不是「禁用」；真正关闭请用 `*_enabled: false`
-- **禁用不会擦除小时配置**：`*_hours` 原样保留，改回 `true` 即恢复原时点；小时值必须是 0-23，非法值启动即报错
-- 关签到会把「余额恢复即解冻」一起关掉，被硬冷却的账号只能等次日 04:00 自然到期
-
-#### 活跃上报（独立排程）
-
-对池内每个可用账号在 `activity_hours`（默认 `[10]` 整点）发送一条对话活跃上报（事件 `chat_request_send`，body 为数组，事件必须含 `userId`）：
-
-- 一条上报同时点亮 growth 连登 + 解锁 `first_buddy` 任务（领养前置）
-- 每号每天 1 次即可（单时点）：日活跃奖励按天去重，重复上报无额外收益
-- `conversationId` 由网关生成（`wb2api-<ms>`），无需真实会话
-- 限速：账号间间隔 800ms（与旅行同口径）
-- **streak 自检**：上报成功后回读连登天数（只读 oracle），日志每号一行可 grep：`activity <uid>: streak days=N`。`days=0` 记 **warn**（`report OK but streak.days=0 (silent drop?)`，对应上游「200 但静默丢弃」）；回读失败记 warn 但不影响主流程（上报按天幂等，不重试，只观测）
-- 手动诊断 / 补跑直接调用 `wb_tasks.py` 里的对应任务函数（例如 `python wb_tasks.py --task=activity_report`，具体 flag 见脚本头部注释）
-
-#### 猫猫旅行（独立排程）
-
-对池内每个可用账号在 `travel_hours`（默认 `[9, 21]` 整点）单趟推进一次，每趟只做一个动作，不轮询不等待。默认两趟闭环：9 点领昨日到站奖励并派出，21 点领当日到站奖励（`daily_limit_reached` 自动挡住二次派出）。
-
-| 探测结果 | 动作 |
-|---|---|
-| 无猫（`buddy` 为 `null`） | 先同意协议（幂等），再尝试领养；过门槛则 +300 积分并获得猫 |
-| `state=idle` 且今日未派出 | 派出 `location_id=4`（古镇客栈；4 个地点收益 / 时长区间相同，无最优解） |
-| `state=arrived` | 领取到站奖励（带 `record_id`） |
-| `state=traveling` / 今日已达上限 / 未知状态 | 跳过 |
-
-- 领养门槛未达标时上游返回 HTTP 400，每账号每自然日只尝试一次（跨日重试，记录仅存内存）；门槛可用活跃上报解除
-- 限速：账号间间隔 800ms
-- 每自然日 1 次派出：按 CST（Asia/Shanghai）自然日重置，与容器 `TZ` 无关
-- 失败隔离：单账号失败只跳过该账号当趟；401 不强刷（token 刷新交保活时点）
-
-## API 端点
-
-**余额后台刷新**（`schedule.balance_refresh_enabled`，缺省开启）：每 `balance_refresh_minutes`（缺省 5）分钟并发查询全部账号余额并更新池内积分——两次签到时点之间 credits 保持新鲜，余额恢复的冷却账号也会自动解冻（语义同签到，但不做签到不刷 token）。面板「立即刷新」按钮也是全量刷余额；5 秒自动轮询只读内存，不打上游。
-
-## 🖥️ Web 管理面板
-
-内嵌式管理面板（`internal/panel`，前端 go:embed 单文件打进二进制，无外部构建依赖），服务启动后访问：
-
-```
-http://127.0.0.1:7863/panel/
-```
-
-鉴权与 API 同口径：`api_key` 非空时面板要求输入一次密钥（浏览器 localStorage 记住）；为空则直接可用。
-界面支持**明暗主题切换**（首次跟随系统偏好，点击按钮两态翻转并记住选择），左侧导航七个视图：
+### 11 个视图
 
 | 视图 | 功能 |
 |---|---|
-| **账号池** | 统计条（账号总数 / 可用 / 冷却中 / 已禁用 / 积分剩余·总额 / 粘性会话）+ 账号表：健康色条与状态标签（可用 / 限流冷却 / 积分冷却 / 熔断 / 连败降权 / 已禁用）、积分量条、成功·失败计数、在途、最近一次用量（次数 / token / 延迟 / 速率）、最近成功时间；单号操作 签到 / 余额 / 任务 / 解冻 / 禁用 / 移除；批量「全部签到」「旅行巡检」「活跃上报」「全部保活」；下方**模型锁池**表列出被上游按模型限流的模型（整池不可用 / 没号可用 / 部分限流）、可选与总数、锁定账号数、最早解锁与全池解锁倒计时、限流原因，无锁定时显示「所有模型均可选」 |
-| **用量** | 指标卡（请求数 / 总 token / prompt / completion / 失败尝试 / 平均延迟，含占比与吐字速率）+ **Token 时序图**（渐变堆叠柱、均值参考线、峰值标注、悬停看单桶明细）+ **用量明细**（按账号 / 按模型 / 按域切换，可按合计 Token / 请求数 / 失败数 / 平均延迟排序，含 prompt·completion 占比条）+ **积分扣除历史**（按账号 / 按模型，折算「积分 / 1M Token」） |
-| **积分构成** | **积分到期分布**（按批次到期日聚合，颜色区分账号）+ **账号对比**（按来源归并的面额 / 余额 / 包数卡片与混合构成条）+ 逐包明细（按到期日排序，默认展开最近到期的 `panel.package_detail_limit` 个，其余与已用完的包折叠） |
-| **任务中心** | 成长任务队列：一键扫描全部账号待办 → 按账号排队执行（账号内串行，账号间可选并发 1-3），进度实时更新；另含开学季券码查询。详见 [任务中心](#-任务中心面板新视图) |
-| **模型与档位** | 实时查询上游：每模型的积分倍率（含限时免费 / 夜间折扣等**生效价**与划线牌价）、默认思考档、支持的档位（含「off（可关）」）、上下文长度与最大输出；存在探测数据时最大输出列显示**实测上限与钳制告警**（见「探测模型真实输出上限」）。支持**按条件查询**：关键词（ID / 名称 / 描述 / 厂商 / 标签，空格分词 AND）、域（CN / Global）、能力（工具 / 视觉 / 思考 / 默认）、思考档位、价格（折扣 / 限时免费 / 打折），以及按倍率 / 上下文 / 最大输出 / ID 排序 |
-| **配置** | 在线编辑 config.json：服务（监听地址 / API 密钥 / 单账号明细条数）、定时任务（签到 / 保活 / 旅行 / 活跃 / 成长任务五类时点与开关 + 余额刷新间隔）、账号池与流量治理、上游与高级（超时 / 出站 UA / 提示词模式 / 指纹脱敏 / 粘性路由）、日志（调用来源记录开关） |
-| **运行日志** | **请求记录表**（时间 / 结果 / 模型 / 账号 / **来源 IP** / **User-Agent** / 耗时 / Token / 积分 / 请求 ID），支持按 IP·UA·模型·账号·请求 ID 与结果筛选、读取条数、时间范围；下方 **运行日志** 按「任务 / 对话 / 系统」分频道，可开关自动滚动 |
+| **概览** | 账号数 / 累计请求 / 成功率 / 实时积分余额四宫格 + 分配策略摘要（当前策略 · 区域 · 粘性会话 · 积分下限，可「调整」）+ 每账号实时余额（含资源包到期）+ 系统信息 |
+| **账号池** | 池策略与「下一个轮到谁」、派活顺序预览（排名 / 区域 / 积分 / 能量 / 空闲时长 / 历史请求）、不可用账号与原因、池状态 |
+| **账号管理** | 扫码登录（国内版 / 国际版，浏览器内完成设备授权并热加载进池）、桌面快照发现导入、账号池表（切换 / 移除）、鉴权文件表（有效 / 已过期与到期时间） |
+| **模型** | 区域切换（合并 / 国内 / 国际）+ 搜索，10 列表格：家族 / 区域 / 上下文 / 最大输出 / 图片 / 推理档位 / 倍率 / 来源（内置 · 上游发现 · 手工覆盖）/ 开关；支持全部启用 / 全部隐藏 / 重新读取；促销时段以徽章标出 |
+| **Token 统计** | 堆叠柱 + 请求数虚线双轴趋势图（按小时分桶）+ 四宫格（总 token / 请求数 / 成功率 / 平均延迟）+ 按模型 / 客户端 / 区域 / 账号四张表 + 最近见过的 User-Agent + 存储口径与筛选（时间范围 / 区域 / 客户端 / 模型） |
+| **积分统计** | 实时余额四宫格 + 每账号卡片（总量条 + 逐包明细与到期日）+ 一键刷新（`/api/credits/live?refresh=1`） |
+| **任务中心** | 任务目录（自动 / 需手工标记）、扫描任务进度、一键完成、**账号保活**、演练模式（`dry_run` 只演练不发请求）、执行结果 |
+| **实时日志** | 积分采集进程状态（运行中 / pid / 退出码）+ 开始采集 / 停止采集 / 立即刷新 + 日志框（等宽字体、自动贴底、`N 行 · 新行在最下`）；对应老控制台原来的「📈 实时面板」 |
+| **诊断** | Python 运行时 / 网关连通性 / 可选依赖与关键文件 / 账号与数据文件四项自检，逐项给「通过 / 需处理」与建议；另有原始信息（`wb_ops.run_checks()` 原样） |
+| **签到日志** | 每日签到（错峰时点 / 补签 / 强制重签 / 演练）+ 每账号签到状态 + 收益账本 + 最近记录 |
+| **设置** | API Key（保存并测试 / 显示隐藏 / 清空）+ 网关 / 账号池 / 用量统计 / 外观四组只读配置 + 完整 `config.json` 预览 |
 
-顶部另有「刷新」（向上游全量查询真实余额并回写；5 秒自动轮询只读内存，不打上游）与「添加账号」（浏览器内完成 OAuth 设备授权：显示授权链接 + 自动轮询，登录后凭证落盘并**热加载进池，免重启**，也支持导入 cockpit tools 导出的 JSON）。
+### 实时刷新与手机端（PWA）
 
-### 时间范围查询
+- 顶栏「**实时 15s**」按钮：打开后按 15 秒节拍自动刷新。「实时日志」页是**原地更新日志框**（不整页重绘、不跳滚动条、自动贴底），其它页面按需重取数据；关闭后不再有任何轮询。开关状态存 `localStorage`（`wb.panel.live`）。
+- 手机/平板（≤900px）：左侧导航收起为抽屉（☰ 打开，点遮罩或 Esc 关闭），底部出现「概览 / 账号 / Token / 日志 / 设置」五格底栏；≤520px 进一步压缩为单列卡片。
+- **装到手机主屏（PWA）**：手机与电脑同一局域网，浏览器打开 `http://<电脑内网IP>:7863/panel/#key=<api_key>` → 菜单里「添加到主屏幕」。`static/manifest.webmanifest`（standalone、竖屏、三个捷径：Token 统计 / 实时日志 / 账号管理）与 `static/sw.js`（预缓存壳文件；`/panel/api/*`、`/v1/*`、`/tasks*` 一律走网络不缓存）由网关托管。
+  > 手机要能访问，需把 `config.json` 的 `listen` 从 `127.0.0.1:7863` 改成 `0.0.0.0:7863` 并放行防火墙；同时务必设置 `api_key`（局域网内也建议开）。
+- **Android App**：`android-app/` 是完整的 Android 工程（WebView 壳 + 面板离线资源），双击 `android-app/build_apk.bat` 即可用本机 JDK 17 + Android SDK 打包（脚本会检查环境并提示缺什么），产物在 `android-app/out/`。不想打包就直接用上面的 PWA——两者共用同一套网关接口，界面也同源。
 
-「用量」与「运行日志 → 请求记录」共用同一个时间范围控件，预设 **今天 / 近 24 小时 / 近 3 天 / 近 7 天 / 近 30 天 / 全部历史 / 自定义**（自定义展开起止时间输入，精确到分钟；起止颠倒就地标红）：
+### 面板专属接口（`/panel/api/*`）
 
-- 「今天」与「自定义」的区间由**浏览器按本地时区**算好后发给服务端——服务端时区未必与浏览器一致（容器常挂 `TZ=Asia/Shanghai`），让服务端算"今天"会在跨时区时切错日子；
-- 滚动预设走服务端的 `hours` 口径（当前整点往回 N-1 小时），与既有统计口径逐位一致（前端自己减 N 小时会在边界多算/少算一个桶）；
-- 用量侧由 `usage.Window` 统一三种窗口口径，并在响应里回显实际生效区间（`window_from` / `window_to`），总览右上角因此会显示形如 `9-30 00:00 → 9-30 15:02 · 14 个分桶 · 数据自 …` 的口径说明；
-- 请求记录的时间过滤在**归档侧**完成（`reqlog.Filter.From/To`，而不是筛已拉取的条目），所以区间落在更早时段时也能取到记录。
+与上游 Go 面板同名但不同实现，均由网关提供、同一 Bearer 鉴权：
 
-### 调用来源（客户端 IP / User-Agent）
-
-请求记录表会显示每次调用的来源：IP 取 `X-Forwarded-For` 首段 → `X-Real-IP` → 回落 TCP 对端（直连部署下这是唯一线索）；User-Agent 截断 200 字节入库，stdout 流水行同时追加压缩后的客户端标签（`src=203.0.113.7 ua="Chrome/120.0.0.0"`，浏览器 UA 不会整段铺开）。
-
-来源信息比 token 计数敏感（IP 属个人信息），因此由 `logging.request_client_info` 控制，**缺省开启、热生效、面板「配置 → 日志」可关**；关闭后归档与面板都不再出现来源字段（老归档里没有该字段的条目显示 `—`）。
-
-**配置热生效**：保存配置后，`api_key`、`cooldown.soft_rate`、`features.sanitize_blacklist_fingerprints`、
-`logging.request_client_info`、`pool.*`（熔断/在途/权重）、`schedule.*`（时点/开关/余额刷新间隔）**立即生效，无需重启**；
-涉及进程装配期依赖的字段（`listen`、`auth_dir`、`state_file`、`upstream.*`、`upstash.*`、`session_sticky.ttl`）
-保存后会提示"需重启进程生效"。配置写入采用「深合并且原子替换」：只更新面板表单覆盖的键，
-用户手写的未知键与其余字段原样保留。
-
-### 面板接口（`/panel/api/*`）
-
-与页面同一 Bearer 鉴权，可直接脚本化调用：
-
-| 分组 | 端点 |
+| 端点 | 说明 |
 |---|---|
-| 只读 | `GET overview` · `GET usage`（`hours` 或 `from`/`to`）· `GET packages` · `GET models` · `GET model_probes` · `GET logs` · `GET request_metrics` · `GET request_logs`（`limit` / `outcome` / `account` / `model` / `client_ip` / `user_agent` / `from` / `to`）· `GET config` · `GET tasks/queue` · `GET school/vouchers` |
-| 账号运维 | `POST accounts/{uid}/checkin` · `balance` · `revive` · `disable` · `remove`；`POST checkin_all` · `travel_all` · `activity_all` · `keepalive_all` · `balance_all` |
-| 任务 | `GET accounts/{uid}/tasks`；`POST accounts/{uid}/tasks/accept` · `accept_all` · `claim` · `auto` · `auto_all`；`POST tasks/scan_all` · `tasks/run_queue` |
-| 添加账号 | `POST login/start` · `GET login/poll` · `GET login/regions` · `POST import/cockpit` |
-| 写入 | `POST config`（校验 → 落盘 → 热应用，返回需重启字段清单）· `POST usage/save`（立即把内存用量落盘） |
+| `GET /panel/api/logs?n=400` | 采集日志（`n` 上限 2000）+ 采集进程状态 `{running, pid, exit_code, hint}` |
+| `POST /panel/api/collect/start`（`{action}`） · `POST /panel/api/collect/stop` · `GET /panel/api/collect/status` | 启停积分采集进程（`wb_ops.start_collect` 拉起 `wb_credits_fetcher.py --auto`） |
+| `GET /panel/api/diagnose` | 四项自检结果（`wb_ops.run_checks()`） |
+| `POST /panel/api/keepalive`（`{dry_run, account_id?}`） | 账号保活，等价于 `POST /tasks/keepalive` |
+| `GET /panel/api/{stats,pool,accounts,models,snapshots,checkin,config}` · `/panel/api/usage` · `/panel/api/usage/meta` · `/panel/api/login/start` · `/panel/api/login/poll` | 面板各视图的数据接口 |
 
-账号运维操作均落到池既有入口（`Revive`/`Disable`/`Remove` 等），与 `/status` 观测口径一致。
-
-**安全响应头**：面板页面与全部 `/panel/api/*` 响应统一带 `Content-Security-Policy`（`default-src 'none'`，脚本仅同源，`frame-ancestors 'none'` 禁嵌套）、`X-Content-Type-Options: nosniff`、`X-Frame-Options: DENY`、`Referrer-Policy: no-referrer` 等；前端脚本独立为同源 `app.js`，不含内联脚本与内联事件处理器。
-
-**鉴权实现**：`internal/httpauth` 统一 server 与 panel 的 Bearer 校验，使用 SHA-256 摘要 + `subtle.ConstantTimeCompare` 常量时间比较（避免逐字节比较泄露密钥信息）；上游返回的 `uid` 经白名单校验（`[A-Za-z0-9_-]`，长度 ≤64）后才用于拼凭证文件名，防止路径穿越。
-
-> ⚠️ 公网部署提示：服务自身只提供明文 HTTP，**请务必置于 HTTPS 反向代理之后**（Nginx/Caddy 等）并配置访问限流；仅本机或私有网络使用时可直接运行。
+> 📌 上游 Go 版的嵌入式面板（`internal/panel`、go:embed 单文件）**已不在本仓库**：本项目是 Python 重写，界面就是本节这套 `static/` 静态面板，仓库里不含任何 Go 源码或构建产物。
 
 ## 🔌 API 端点
 
+### OpenAI 兼容（给客户端 / DSH 用）
+
 | 端点 | 鉴权 | 说明 |
 |---|---|---|
-| `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式/非流式；请求体上限 8 MiB |
-| `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表（纯动态拉取，缓存 1h；失败返回空列表 + 5min 负缓存）；每模型带 `context_length`/`max_output_tokens`（四级查找链：上游目录 → 内置知识表 → model.json 缓存 → models.dev）、`reasoning_supported_efforts`/`reasoning_default_effort` 思考档位及描述/标签/倍率等全字段（上游有返回时） |
-| `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分/冷却/熔断/在途/粘性）+ `model_locks`（按「域 + 模型」聚合的限流视图：可选 / 总数、锁定账号数、`state`、最早解锁与全池解锁时间、限流原因；无锁定为空） |
-| `GET /healthz` | 无 | 健康检查：有 healthy 且未占满账号返回 200，否则 503；响应带身份标识（见下） |
+| `POST /v1/chat/completions` | Bearer（`api_key` 非空时） | OpenAI 兼容补全；流式透传 / 非流式本地聚合；**请求体没有大小上限**（按 `Content-Length` 原样读入） |
+| `GET /v1/models` | Bearer（`api_key` 非空时） | 模型列表：内置目录（`wb_models` 的 `_BUILTIN`）+ `data/models.json` 里的开关与手工覆盖 + 上游发现结果；每模型带 `context_length` / `max_output_tokens`（目录或上游有才输出）、推理档位、倍率、区域与来源 |
+| `GET /status` | Bearer（`api_key` 非空时） | 账号状态汇总 + 每账号详情（积分 / 能量 / 软冷却 / 熔断 / 粘性）+ `policy`（策略 · 区域 · 积分下限 · 游标）+ `auth_files` + `live_credits`（实时余额，30 秒缓存） |
+| `GET /healthz` | 无 | 恒返回 `{"status": "ok", "version": "1.0.0"}`（`wb_gateway.py:1419`） |
 
 > 鉴权规则：仅当 `api_key` 非空才校验 `Authorization: Bearer <api_key>`；**`api_key` 为空时上述端点直接放行**；`/healthz` 恒无鉴权。
 
-`/healthz` 响应示例（200 / 503 同结构，仅状态码与计数变化）：
+> 没有 `X-Service` 响应头、没有 `healthy/total` 计数、也没有「无可用账号就 503」的健康检查语义——`/healthz` 只表示进程活着。要探活并确认是本网关，用 `/status` + 正确的 `api_key`。
 
-```json
-{"healthy": 2, "total": 3, "service": "workbuddy2api"}
-```
+### 管理类端点
 
-响应同时带 `X-Service: workbuddy2api` 头。这两个身份标识用于区分**本网关**与同端口上可能残留的其他服务——对方即使返回 2xx 也不会带该字段 / 头，宿主探测据此避免"假成功"。
-
-**宿主健康探测指引**：强校验（推荐）用 `/status` + `api_key`——只有持有正确 `api_key` 的本网关返回 200，其他服务返回 401 / 404；弱校验（不适合持 key 的负载均衡器）用 `/healthz` + `service` 字段判据（`/healthz` 恒无鉴权，`service == "workbuddy2api"` 才算命中本网关）。容器自带 `HEALTHCHECK` 用的就是弱校验（仅进程内自检，够用）。
+| 端点 | 说明 |
+|---|---|
+| `GET /api/pool` · `/v1/pool` | 池状态 + 派活顺序预览 + 不可用账号与原因 |
+| `GET /api/auth-files` | `auths/*.json` 列表（有效 / 已过期 + 到期时间） |
+| `POST /api/switch` · `/v1/switch` · `/panel/api/accounts/switch` | 把某个账号设为当前账号（`{account_id}`） |
+| `POST /api/refresh-tokens` | 强制刷新全部账号 token（`force=True`） |
+| `POST /api/reload-auths` · `/panel/api/reload-auths` | 重新读取 `auths/` 并热加载进池 |
+| `GET /api/credits/live`（`?refresh=1`） | 实时余额；`refresh=1` 绕过 30 秒缓存 |
+| `GET /tasks/list` · `POST /tasks/{scan,run,keepalive}` | 任务引擎（`dry_run` 只演练不发请求；`keepalive` 等价于 `POST /panel/api/keepalive`） |
+| `/panel/api/*` | 面板各视图接口（见上一节表格） |
 
 ### 流式行为细节
 
-- 出站请求强制 `stream:true`；SSE 帧按 OpenAI 规范**白名单重建**（`reasoning_content` 保留、工具调用按 index 合并、未知字段剥离）
-- 保证恰好一个 `data: [DONE]`（上游漏发时兜底补写）；空流先写一帧 `error` 再补 `[DONE]`
-- 非流式请求由本地聚合完整 SSE 流为单 `chat.completion` 响应（含 `reasoning_content` / `tool_calls`）
+- 出站请求强制 `stream: true`；客户端要**流式**时逐 1 KiB chunk **原样透传**（不做帧重建、不剥字段、不补 `data: [DONE]`），边传边用 `StreamUsageTap` 抓最后一帧的 usage。
+- 客户端要**非流式**时，`aggregate_sse_completion()` 把上流 SSE 聚合成一个 `chat.completion`（正文拼接、`tool_calls` 按 index 合并、带 usage）再返回。
+- 上游返回 HTTP 错误码：`429` 会被当成限流记一次失败（可能触发软冷却 / 熔断），响应体是 `{"error":{"message":"Upstream error: <code>","type":"api_error","code":<code>}}`；其它异常统一 500 `Request failed: …`。响应头已发出（流式已开始）时错误只写日志。
+- 每次请求（成功与失败）都会落一条用量记录；成功还会 `record_success()` 把 `fail_count` 清零。
 
-### 上游端点
+### 上游端点（本分支真正调用的）
 
-上游接口均为 CodeBuddy 官方 CLI / 插件使用的**非公开 / 逆向接口**，未见公开 API 文档；路径及 Host 以代码内常量为准（见文末出处表）。两类 base：
+上游接口都是 CodeBuddy 官方 CLI / 插件使用的**非公开接口**，没有公开文档，路径以代码内常量为准。三个 base：`CHAT_BASE = https://copilot.tencent.com`、`BILL_BASE = https://www.codebuddy.cn`、`WEB_BASE = https://www.workbuddy.cn`；国际版账号换成 `https://www.workbuddy.ai`。
 
-- **`copilot.tencent.com`**：聊天补全（SSE）、token 刷新、OAuth、模型列表、growth 域（旅行 / streak）
-- **`www.codebuddy.cn`**：每日签到、余额查询、活跃上报
+| 路径 | 方法 | 用途 | 出处 |
+|---|---|---|---|
+| `{CHAT_BASE}/v2/chat/completions` | POST | 聊天补全（SSE） | `wb_gateway.chat_upstream_url`／`wb_tasks.py:316` |
+| `{CHAT_BASE}/v2/plugin/auth/token/refresh` | POST | token 刷新 | `wb_tasks.py:1244` |
+| `{base}/v2/plugin/auth/state?platform=CLI` | POST | OAuth 取授权 URL | `wb_auth.py:147` |
+| `{base}/v2/plugin/auth/token?state=` | GET | OAuth 轮询取 token | `wb_auth.py:220` |
+| `{base}/v2/plugin/login/account?state=` | GET | OAuth 取账号信息 | `wb_auth.py:229` |
+| `/v2/billing/meter/daily-checkin` | POST | 每日签到（`workbuddy.cn`／`workbuddy.ai`） | `wb_auth.py:196`／`wb_checkin.py:45-46` |
+| `/v2/billing/meter/get-user-resource` | POST | 实时余额（积分包明细） | `wb_live_credits.py:121` |
+| `{CHAT_BASE}/v2/activity/growth/tasks` | GET | 任务列表 | `wb_tasks.py:214` |
+| `{CHAT_BASE}/v2/activity/growth/tasks/accept` | POST | 接受任务 `{"task_codes":[…]}` | `wb_tasks.py:268` |
+| `{WEB_BASE}/activity/growth/tasks/<code>/claim` | POST | **领取任务奖励**（任务码在路径、body 为空；必须走 Web 域） | `wb_tasks.py:281` |
+| `{CHAT_BASE}/v2/report` | POST | CLI 事件上报（事件数组，自动注入指纹） | `wb_tasks.py:302/455` |
+| `{WEB_BASE}/v2/report` | POST | Web 单条 `web_element_click`（`Library_read` 用） | `wb_tasks.py:483` |
+| `{CHAT_BASE}/activity/growth/buddy/agreement` | POST | 领养前置：同意协议（幂等） | `wb_tasks.py:800` |
+| `{CHAT_BASE}/activity/growth/buddy/first` | POST | 领养前置：首次领养 | `wb_tasks.py:804` |
+| `{CHAT_BASE}/activity/growth/streak` | GET | 连登天数 | `wb_tasks.py:1254` |
+| `{CHAT_BASE}/v2/user-asset/appearance/set` | POST | 外观设置（`Hp_Appearance`） | `wb_tasks.py:768` |
+| `{CHAT_BASE}/portal/operation-platform/market/expert/list` | POST | 专家列表（专家类任务） | `wb_tasks.py:648` |
 
-| 相对路径（绝对路径见出处表） | 方法 | 用途 |
-|---|---|---|
-| `chat/completions` | POST | 聊天补全（SSE） |
-| `console/enterprises/personal/models` | GET | 动态模型列表 |
-| `plugin/auth/token/refresh` | POST | token 刷新 |
-| `billing/meter/daily-checkin` | POST | 每日签到 |
-| `billing/meter/get-user-resource` | POST | 余额查询 |
-| `report` | POST | 对话活跃上报（`chat_request_send` 事件数组，必须含 `userId`；点亮连登 / 解锁领养） |
-| `plugin/auth/state?platform=CLI` | POST | OAuth 取授权 URL |
-| `plugin/auth/token?state=` | GET | OAuth 轮询取 token |
-| `plugin/login/account?state=` | GET | OAuth 取账号信息 |
-| `activity/growth/buddy/agreement` | POST | 猫猫旅行：同意协议（幂等） |
-| `activity/growth/buddy/first` | POST | 猫猫旅行：首次领养 |
-| `activity/growth/buddy/info` | GET | 猫猫旅行：查询猫档案 |
-| `activity/growth/buddy/travel/status` | GET | 猫猫旅行：旅行状态 |
-| `activity/growth/buddy/travel/depart` | POST | 猫猫旅行：派出 |
-| `activity/growth/buddy/travel/claim` | POST | 猫猫旅行：领奖 |
-| `activity/growth/streak` | GET | 连登天数 + 兑换档位状态（活跃自检 / 连登管家） |
-| `activity/growth/redeem` | POST | 连登档位兑换（`{tier, client_token}`；未解锁 403） |
-| `activity/growth/lottery/summary` | GET | 抽奖次数查询 |
-| `activity/growth/lottery/draw` | POST | 抽奖一次（`{client_token}`，消耗 1 次） |
-| `activity/growth/tasks` | GET | 任务列表（含 reward_credit/reward_energy/progress） |
-| `activity/growth/tasks/accept` | POST | 接受任务（`{"task_codes":[...]}`） |
-| `activity/growth/tasks/<task_code>/claim` | POST | **领取任务奖励**（任务码在路径、无 body；**Web 域 `www.workbuddy.cn`**，非 CLI 域——这是领奖能成功的关键） |
+出站 UA：`wb_auth.CLIENT_UA = CLI/2.63.2 CodeBuddy/2.63.2`；`wb_tasks.UA_CLI = WorkBuddy/5.5.6 CLI/2.63.2`、`UA_DESKTOP = WorkBuddy/5.5.6 WorkBuddy/5.5.6 CLI/2.137.1`。**没有** `upstream.user_agent` 之类的 UA 覆盖开关。
 
-出站请求统一携带 `CLI/2.63.2 CodeBuddy/2.63.2` UA（可被 `upstream.user_agent` 覆盖）；聊天请求带账号头（`X-User-Id` 等），**永不携带 `X-Refresh-Token`**（该头只出现在 token 刷新请求）。领奖请求额外带 `x-client-platform: web` 与 workbuddy.cn 的 Origin/Referer。
+**本分支不调用的接口**：猫猫旅行（`buddy/travel/*`）、连登档位兑换（`activity/growth/redeem`）、抽奖（`activity/growth/lottery/*`）、活跃上报排程——这些在上游 Go 版里有，Python 侧代码中不存在。
 
-## 请求级日志
+### 请求日志与用量统计
 
-每个 `/v1/chat/completions` 请求结束时输出一行表格日志（stdout）：
-
-```text
-| #001 | 18:31:31 | deepseek-v4 | stream | 200 | uid=0851ce35 | TTFB=801ms | tok=60 | 23.5tok/s | total=2.6s |
-```
-
-| 字段 | 说明 |
-|---|---|
-| `#001` | 进程级请求序号 |
-| `18:31:31` | 结束时刻 |
-| `deepseek-v4` | 模型名（超 11 字符截断） |
-| `stream` / `sync` | 请求模式 |
-| `200` | 状态码 |
-| `uid=0851ce35` | 账号 UID 前 8 位 |
-| `TTFB` | 流式首帧耗时（非流式为 `-`） |
-| `tok` / `tok/s` / `total` | 输出 token 数 / 速率 / 总时长 |
-
-**敏感度**：日志不含任何 token 明文（详见[安全与合规](#安全与合规)），无落盘日志文件。
+- stdout 只有 Python `logging`：格式 `%(asctime)s [%(levelname)s] %(message)s`，外加每个 HTTP 请求一行访问日志 `<地址> - <请求行>`（`wb_gateway.py:1363`）。**没有表格化的 TTFB / tok/s 请求日志，也不落盘日志文件。**
+- 对应的可观测性在面板「Token 统计」页：按小时分桶落 `data/usage.json`（`wb_usage`，`flush_interval_seconds = 5`、`retention_days = 90`），可按模型 / 客户端 / 区域 / 账号聚合，另有最近见过的 User-Agent。
+- 敏感度：日志与用量文件都不含 token 明文（详见[安全与合规](#安全与合规)）。
 
 ## 部署运维
 
@@ -693,36 +515,47 @@ http://127.0.0.1:7863/panel/
 ### 常用命令
 
 ```bash
-# 一键任务（17/18 全自动：成长任务 + 连登管家 + 猫猫旅行 + 活跃上报）
+# 任务引擎：扫描并执行成长任务（默认 auto 集合；没有常驻调度器，跑一次做一次）
 python wb_tasks.py
 
-# 实时余额查询（拉一次当前账号池所有账号的 credits，刷新 WebUI 卡片）
+# 实时余额快照（打印当前池内所有账号的积分包明细）
 python wb_live_credits.py
 
-# 积分采集 / 报表（生成每日积分采集报告，产物落 wb_data/）
+# 积分采集 / 报表（产物落 wb_data/；面板「实时日志」页拉起的也是它）
 python wb_credits_fetcher.py
 
-# 自检（校验环境、依赖、目录权限、网络连通性）
-python selfcheck.py
+# 静态自检（Python 语法 + 页面/static JS 语法 + 源码约束 + static/ 交付文件）
+# 加 --online 再冒烟全部 HTTP 接口（含 /panel/static/*、/panel/sw.js、/panel/api/*）
+python selfcheck.py --online
+
+# 浏览器端功能自检（真实 Edge 点按钮：老界面 /legacy + 统一面板 11 个视图逐页）
+python browser_check.py
 ```
+
+> 冒烟测试报告见 `WorkBuddy_统一管理器/测试报告.md`（45 项断言全通过 / 0 JS 错误，含逐条结果与真机收口命令）。
 
 ### 账号管理
 
-- 多账号：在 WebUI「账号池」点「添加账号」重复添加即可；凭证落盘到 `auths/workbuddy-<uid>.json`，网关**热加载**进池（免重启）。
-- Session 失效账号会被禁用（`disabled_reason` 透出在 `/status`）；在 WebUI「账号池」对该账号点「重新登录」走一遍 OAuth 覆盖凭证即可复活（本项目**不提供源码级 `ReviveDisabled` API**——重新登录就是最快的复活方式）。
-- 备份 = `auths/`（凭证）+ `wb_data/`（状态：积分 / 冷却 / 计数 / 任务日志）。这两类目录已被 `.gitignore` 排除。
+- **多账号**：面板「账号管理」页点「扫码登录（国内版 / 国际版）」，浏览器内完成设备授权后凭据落 `auths/workbuddy-<uid>.json`，网关**热加载**进池（免重启）。也可以手动把凭据文件放进 `auths/`。
+- **不可用的账号**：面板账号表每行有「切换」（把它设为当前账号）与「移除」；账号被上游禁用后，重新扫码登录覆盖凭据即可复活——本项目**没有** `ReviveDisabled` 之类的源码级复活接口，`/status` 里也**没有** `disabled_reason` 字段，不可用原因由池策略现算（停用 / 冷却 / 熔断 / 积分不足）。
+- **备份** = `auths/`（凭据，明文 JWT）+ `data/`（池状态 / 用量 / 模型覆盖 / 签到状态）+ `wb_data/`（采集产物与任务流水）。
 
 ### 日志与文件布局
 
 | 路径 | 内容 |
 |---|---|
-| `config.py` | 用户可编辑配置（`GATEWAY.api_key` / `CONSOLE.port` / `AUTOTASKS` 等） |
-| `config.example.json` | 占位符模板（本仓库唯一公开的 JSON 配置参考） |
-| `auths/workbuddy-<uid>.json` | OAuth 凭证（明文 `accessToken` / `refreshToken`，权限 `0600`） |
-| `wb_data/state.json` | 账号池状态：积分 / 冷却 / 计数 / disabled 标志 |
-| `wb_data/tasks_log.jsonl` | 任务执行流水（一行一条 JSON） |
-| `wb_data/credits_history*.json` | 每日积分采集历史 |
-| `wb_data/*.html` / `*.png` | 报表与截图产物 |
+| `config.json` | **真正生效**的网关配置（`listen` / `api_key` / `auth_dir` / `state_file` / `upstream` / `pool` / `cooldown` / `models` / `usage` / `schedule`）；面板「设置」页只读预览，`POST /panel/api/config` 可改写并落盘，但 `api_key` 这类模块级取值要重启才生效 |
+| `config.py` | 老式账号配置（`ACCOUNTS`）与 `GATEWAY` / `CONSOLE` / `COLLECTOR` / `AUTOTASKS` 常量；**网关不读它** |
+| `config.example.json` | 配置模板 |
+| `auths/workbuddy-<uid>.json` | OAuth 凭据（明文 `accessToken` / `refreshToken`；写盘方式是 tmp 文件 + replace） |
+| `data/state.json` | 账号池状态：`current_account_id` / `sticky_sessions` / 每账号计数与冷却 |
+| `data/usage.json` | Token 用量分桶（`version` 5） |
+| `data/models.json` | 模型开关与手工覆盖（不存在时用内置目录） |
+| `data/checkin_state.json` | 签到状态与上次运行 |
+| `wb_data/tasks_log.jsonl` | 任务 / 签到流水（一行一条 JSON；文件不存在 = 还没跑过） |
+| `wb_data/credits_history*.json` | 积分采集历史 |
+| `wb_data/collect_log.txt` · `fetch_log.txt` | 面板「实时日志」页显示的采集输出 |
+| `wb_data/report_*.html` · `screenshot_*.png` | 采集报表与截图产物 |
 
 以上运行时产物**全部**由 `.gitignore` 排除，不会进入版本控制。
 
@@ -732,19 +565,19 @@ python selfcheck.py
 
 - **位置**：`./auths`（`auth_dir` 可配），文件名 `workbuddy-<uid>.json`
 - **内容**：明文 `accessToken` / `refreshToken` + 账号元信息（`account.uid` / `enterpriseId` / `nickname`）
-- **权限**：token 刷新以 `0600` 权限原子写回（tmp 文件 + rename），Python 侧用 `os.chmod` 保证
-- **切勿提交 git**：`.gitignore` 已排除 `auths/`、`wb_data/`、`config.json`、`*.key`、`*.pem`、`*.env` 及日志临时产物
+- **写盘**：tmp 文件 + `replace()` 原子替换（避免写坏半个文件）；**代码里没有 `chmod` 之类的权限加固**（Windows 也没有 POSIX 权限语义）——靠目录权限与「不提交 git」来保护
+- **切勿提交 git**：`.gitignore` 已排除 `auths/`、`data/`、`wb_data/`、`config.json`、`*.key`、`*.pem`、`*.env` 及日志临时产物
 
 ### 2. 网络暴露与日志敏感度
 
-- 默认监听 `:7863`，compose 暴露 `0.0.0.0:7863`，**无内置 TLS**；公网部署必须设置 `api_key`，建议前置反代 / 内网
-- 请求日志字段：序号 / 模型 / 模式 / 状态码 / **uid 前 8 位** / TTFB / token 数——**不含** `accessToken` / `refreshToken` / `api_key` 明文（不读取 `Authorization` 头）
-- 日志写 **stdout / stderr**（容器内进入 `docker logs`），代码无任何落盘日志文件
+- 默认只监听本机（`config.json` 的 `listen`，`":7863"` / `"0.0.0.0:7863"` 也支持），**无内置 TLS**；要局域网或公网访问必须设置 `api_key`，并建议前置反代 / 只在内网用
+- 日志只有 Python `logging` 与每个请求一行访问日志，内容**不含** `accessToken` / `refreshToken` / `api_key` 明文（也不读取 `Authorization` 头内容）；用量统计只记 uid / 模型 / 客户端 / 区域
+- 日志写 **stdout / stderr**，代码没有任何落盘日志文件
 
 ### 3. 发布来源与合规边界
 
-- **纯 Python 源码分发**：本仓库只发源码，无预编译二进制 / 无 Docker 镜像 / 无第三方运行时依赖（除了 `pip install` 的少量第三方库）
-- 登录 / 任务 / 积分工具全部是本仓库根目录下的 Python 脚本：`wb_tasks.py` / `wb_live_credits.py` / `wb_credits_fetcher.py` / `selfcheck.py`（WebUI「添加账号」按钮走浏览器 OAuth）
+- **纯 Python 源码分发**：本仓库只发源码，无预编译二进制 / 无 Docker 镜像；除采集与浏览器自检用的 `playwright` 外没有重型依赖
+- 所有工具都是根目录下的 Python 脚本：`main.py` / `wb_gateway.py` / `wb_webui.py` / `wb_tasks.py` / `wb_auth.py` / `wb_checkin.py` / `wb_live_credits.py` / `wb_credits_fetcher.py` / `wb_usage.py` / `wb_models.py` / `wb_snapshot.py` / `wb_ops.py` / `selfcheck.py` / `browser_check.py`（面板「账号管理」页的扫码登录走浏览器设备授权）
 - 上游 CodeBuddy 属腾讯系商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
 
 ### 4. 授权使用边界
@@ -754,81 +587,97 @@ python selfcheck.py
 - 遵守 CodeBuddy 平台服务条款与所在地法律
 - 妥善保管 `auths/`（明文凭证）与网关端口
 
+
 ## 常见问题
 
-### 429 code=6004（模型级限流）的冷却语义？
+### 上游报 429 / 被限流了怎么办？
 
-上游 `429` + `code 6004` 是**该模型的使用量超限**（msg 通常带「将在 YYYY-MM-DD HH:MM:SS UTC+8 重置」），**不是账号整体被限流**。网关的处理：
+网关按 **HTTP 状态码**处理，不做错误码细分（`wb_gateway.py:1846`）：
 
-- **冷却到上游重置时间**：msg 带「将在 … 重置」时，账号冷却 `until` 精确等于该墙钟（按 UTC+8 解释），并封顶 `soft_rate_max`（默认 2h）
-- **切模型立即可用**：冷却由 6004 触发时会记录触发模型；同一账号改用**其他模型**请求时视为可用。同模型或未记录模型的冷却回到现状
-- **退回指数退避**：6004 无「将在 … 重置」文案，或非 6004 的普通软限流 → 仍是 `soft_rate`（600s 起，连续触发指数退避，封顶 `soft_rate_max`）
+- `429` → 记为一次失败，并给该账号设软冷却 `cooldown.soft_rate`（默认 600s）
+- 连续失败累计到 `pool.breaker_threshold`（默认 3）→ 熔断 `pool.breaker_cooldown`（默认 1800s）
+- 任意一次成功清零计数；冷却与熔断到期自动恢复
 
-### 多图会话请求体超限怎么办？
+**没有**按 `code=6004` 解析「将在 … 重置」、**没有**按模型切分冷却、**没有**指数退避或封顶——上游 Go 版那套模型级冷却语义在本分支不存在。面板「账号池」页会列出每个不可用账号的原因（停用 / 冷却中 / 熔断中 / 积分不足）。
 
-网关**不再设请求体上限**（`server.max_body_mb` 已移除，对齐上游）：任意大小的请求体都会完整读入并转发上游，超限类问题由上游自然返回错误——其响应信息量更大（能看到上游的真实策略），网关不再以 413 提前拦截。
+### 请求体（多图 / 长上下文）有大小限制吗？
 
-- 多图/长上下文会话（历史图片每轮以 base64 重发，编码再膨胀约 37%）不会再撞网关侧 413
-- 若上游真的返回 413/超限错误，网关按既有错误分类链路如实透传（不打码、不罚号——超限是请求侧问题）
-- 客户端中途断流导致的半截 body 在读入阶段即报 `400 invalid_request`，不会把截断 JSON 喂给上游（issue #41 语义保留在读错误路径）
+**没有**：Python 侧按 `Content-Length` 原样读入再转发（`wb_gateway.py:1719-1723`），多图会话不会再撞网关侧 413。
 
-### Docker 部署登录后报「写入 auths/…json.tmp 失败： permission denied」？
+- 客户端中途断流导致半截 body：`json.loads` 失败后 `request_data = {}`，请求会以空 body 继续走到上游并拿到上游自己的报错（不是网关侧 400）。
+- 上游真返回 413 时按普通错误透传 `{"error":{"message":"Upstream error: 413",…}}`；413 不是 429，不会触发软冷却，但会累加失败计数。
 
-容器以 `app` 用户（uid 10001）运行，而宿主机挂载的 `./auths`、`./data` 目录属主不是它——写凭证 tmp 文件被拒。三种解法任选（前两种均**无需 root 容器**）：
+### 面板「实时日志」页的采集进程起不来？
 
-```bash
-# 方案 1（推荐，非 root）：让容器以你自己的 uid 运行——挂载目录本来就是你建的
-PUID=$(id -u) PGID=$(id -g) docker compose up -d --force-recreate
-# 或写进 .env 文件长期生效（.env 已被 .gitignore 忽略）：
-#   echo "PUID=1000" > .env && echo "PGID=1000" >> .env
+采集依赖 `playwright`（默认 `msedge` 通道）。`spawn EPERM` / `BrowserType.launch` 之类一般是浏览器缺失或权限问题——`wb_ops._collect_hint()` 会把常见原因翻成人话显示在页面上；也可以直接跑 `python wb_credits_fetcher.py` 看真实报错。
 
-# 方案 2：把挂载目录属主交给容器默认用户（需要 sudo）
-sudo chown -R 10001:10001 ./auths ./data ./config.json
+> 另注：`playwright` 只装在装过它的那个 Python 环境里（本机是 Python 3.15 的 site-packages），换解释器跑采集会报缺模块。
 
-# 方案 3：compose 设 user: "0:0" 以 root 运行（NAS/群晖不便 chown 时用）
-```
+### 账号被上游禁用后如何恢复？
 
-报错信息里自带这条指引；compose 的 `user` 已参数化为 `${PUID:-10001}:${PGID:-10001}`。
+重新走面板「账号管理」页的「**扫码登录**（国内版 / 国际版）」覆盖 `auths/` 里的凭据即可。本分支没有 `ReviveDisabled` 接口，也没有 `disabled` / `disabled_reason` 字段——池里的「不可用」都是现算的。
 
-### 账号被 Disable 后如何恢复？
+### 想让新模型出现在列表里？
 
-- **用 `./login.sh` 重新登录**覆盖凭证，重启后自动回池；
-- 或源码侧调用 `Pool.ReviveDisabled(uid)` 清除 `disabled` 状态（`state.json` 同步刷新）。
+内置目录在 `wb_models.py` 的 `_BUILTIN`（`wb_models.py:94-138`）；面板「模型」页可以逐个启用 / 隐藏，也可以写 `data/models.json` 做手工覆盖（来源会标成「手工覆盖」）。
 
-### 系统提示词被内容策略误杀怎么办？
+### 官网「使用端」列显示的不是 WorkBuddy？
 
-默认 `prompt.mode=custom` 已用网关自有提示词替换客户端 system，从源头消除大部分误报；用户 / assistant 消息中的指纹串由 `features.sanitize_blacklist_fingerprints` 清洗，两层叠加。`passthrough` 模式下首遇拦截会自动换 Degraded 中性提示词同请求重试一次。
-
-### 如何让官网「使用端」列显示为 WorkBuddy？
-
-官网「使用端」列按出站请求 UA 服务端归因。配置 `upstream.user_agent: "WorkBuddy/2.x.x"`（或环境变量 `WB2A_USER_AGENT`）即可改写全部出站请求的 UA；默认保持 `CLI/2.63.2 CodeBuddy/2.63.2` 现状（指纹净化考虑，可配而非改死）。
+UA 在本分支里是**代码常量**（`wb_tasks.UA_CLI` / `UA_DESKTOP`、`wb_auth.CLIENT_UA`），**没有** `upstream.user_agent` / 环境变量之类的覆盖开关；要改只能改代码。
 
 ## 关键断言 ↔ 代码出处
 
 | 断言 | 出处 |
 |---|---|
-| `prompt.mode` 默认 `custom` | `cmd/server/config.go:148` |
-| 请求体无网关侧上限（max_body_mb 已移除） | `internal/server/handler.go` chatCompletions 读 body 段 |
-| 出站强制 `stream:true` | `internal/upstream/payload.go:28` |
-| DeepSeek 思维链注入（`thinking.type=enabled`） | `internal/upstream/thinking.go:110` |
-| 默认 `reasoning_effort` 档位 = `high` | `internal/upstream/thinking.go:32` |
-| `reasoning_content` 多轮回填（assistant 消息） | `internal/upstream/thinking.go:54` |
-| Degraded 中性提示词常量 | `internal/prompt/prompt.go:25` |
-| 降级触发与次日 00:00 CST 重置 | `internal/server/degrade.go:30`（Trigger）、`:46`（nextMidnightCST） |
-| 6004 模型级限流 code 与重置时间解析 | `internal/upstream/client.go:127`、`internal/upstream/client.go:147` |
-| `11101` / Unmarshal 失败不罚号 | `internal/upstream/client.go:114-115`；处理分支 `internal/server/handler.go:489` |
-| 出站 UA 覆盖（空 = 现状 `CLI/2.63.2 CodeBuddy/2.63.2`） | `cmd/server/config.go:73`；接线 `cmd/server/main.go:96` |
-| session-dead 连续阈值 3 才禁用 | `internal/pool/pool.go:249-253`（`sessionDeadThreshold`） |
-| `ReviveDisabled` 人工复活 | `internal/pool/pool.go:951` |
-| disabled 账号透出 `disabled_reason` | `internal/pool/pool.go:1162-1165` |
-| 硬冷却至次日 04:00 | `internal/pool/pool.go:882`（`CooldownUntilTomorrow4AM`） |
-| 软冷却退避封顶 2h | `internal/pool/pool.go:247`（`defaultSoftRateMax`） |
-| Top-5 候选短名单 | `internal/pool/pool.go:584` |
-| `activity_hours` 默认 `[10]` | `cmd/server/config.go:135` |
-| 活跃自检回读 streak | `internal/scheduler/scheduler.go:227`（`checkActivityStreak`） |
-| streak 端点 `activity/growth/streak` | `internal/upstream/travel.go:24`（常量）、`:139`（`GrowthStreak`） |
-| Redis 粘性镜像 7 天 TTL | `internal/redisstore/redisstore.go:21` |
-| 静态模型表含 `deepseek-v4-flash` 等 | `internal/server/handler.go:146` |
+| 网关入口（`ThreadingHTTPServer`，默认 `127.0.0.1:7863`，daemon 线程） | `wb_gateway.py:2657`（`main()`）、`:2593`（建 server） |
+| `api_key` 为空则不鉴权，否则 `Bearer` 必须完全相等 | `wb_gateway.py:1365`（`_check_auth`） |
+| `/healthz` 恒返回 `{"status":"ok","version":"1.0.0"}` | `wb_gateway.py:1419-1420` |
+| 出站强制 `stream: true` | `wb_gateway.py:1764` |
+| 非流式 = 把上游 SSE 聚合为 `chat.completion` | `wb_gateway.py:1084`（`aggregate_sse_completion`） |
+| 上游 URL 优先级 `upstream.base_url` > `global.chat_base` > `CHAT_BASE` | `wb_gateway.py:1064-1071`（`chat_upstream_url`） |
+| 请求体无网关侧上限（按 `Content-Length` 读入） | `wb_gateway.py:1719-1723` |
+| 模型名兜底 `resolve_model`（未知 / 隐藏 / 跨区替换） | `wb_gateway.py:637`；内置目录 `wb_models.py:94-138`（`_BUILTIN`） |
+| 无可用账号 → 503 + 账号(原因) 名单 | `wb_gateway.py:1740-1753` |
+| `429` → 软冷却 `cooldown.soft_rate`（默认 600s） | `wb_gateway.py:1846`（`is_rate_limit`）、`:563`（配置）、`:317-319`（落冷却） |
+| 熔断：`fail_count ≥ breaker_threshold`（默认 3）→ `breaker_cooldown`（默认 1800s） | `wb_gateway.py:321-324`、`:558-562`（配置） |
+| 成功清零失败计数 | `wb_gateway.py:302`（`record_success`） |
+| 四种分配策略 `priority` / `round-robin` / `balanced` / `sticky` | `wb_pool_policy.py:28-42`；选号主逻辑 `:351-447`（`select`） |
+| 均衡权重 = `clamp(闲置小时 × idle_weight_per_hour, 1, idle_weight_max)` | `wb_pool_policy.py:331`、`:316-342` |
+| 区域由凭据域名判断（含 `workbuddy.ai` = 国际版） | `wb_gateway.py:578-581`；`wb_pool_policy.py:81-85` |
+| 会话键 = 请求体 `user` 字段，缺失则每次新 uuid | `wb_gateway.py:1730` |
+| 粘性绑定落 `data/state.json`；策略路径无 TTL（旧逻辑 1800s） | `wb_gateway.py:207-216`、`:236`；`wb_pool_policy.py:382-392` |
+| 实时余额 30 秒缓存，`?refresh=1` 绕过 | `wb_gateway.py:1023-1057` |
+| 没有内置调度器（`schedule` / `AUTOTASKS` 无执行者） | `wb_gateway.py:87-91`（仅默认值）；`main.py:150-185`（只建目录 / 起进程 / 开浏览器） |
+| 任务表（16 条）与自动任务码 | `wb_tasks.py:67`（`TASKS`）、`:88`（`AUTO_TASK_CODES`） |
+| 领奖必须走 Web 域 | `wb_tasks.py:281` |
+| 用量落 `data/usage.json`（`version` 5），流式也计 | `wb_usage.py:48`、`:244`（`StreamUsageTap`）、`:157`（`detect_client`）；`wb_gateway.py:601-611` |
+| 面板静态路由（含路径穿越防护）与 PWA 入口 | `wb_gateway.py:2525`（`resolve_static`）、`:2573`（`serve_panel_sw`）、`:2606`（`serve_panel`） |
+| 老控制台 `/` 302 跳统一面板，`/legacy` 兜底 | `wb_webui.py`（根路径 302 + `/legacy`） |
+
+## 接入 DSH（把本网关当成 DSH 的模型供应商）
+
+本机 DSH 可以直接把本网关注册成一个模型路由（`workbuddy-manager`），在聊天界面的模型选择器里选用多账号池里的模型；
+请求仍然走网关这一侧的策略（轮转 / 粘性 / 熔断 / 积分下限），DSH 不用改任何代码。
+
+- 配置片段：`dsh/cordis.workbuddy.patch.yml`
+- 完整步骤（环境变量、粘贴位置、验证 curl、报错对照、字段依据）：`DSH接入说明.md`
+
+**当前状态（2026-10-17）：已经装好**——`workbuddy-manager` 路由写在 `C:\Users\<你的用户名>\.dsh\profiles\desktop\cordis.patch.yml` 的
+`- id: llm-pi-ai` → `config:` → `providers:` 下（与 `sensenova:` 同级），凭据 `WORKBUDDY_API_KEY` 写在 `C:\Users\<你的用户名>\.dsh\.credentials.yaml` 的 `refs:` 段；
+两份还原点 `cordis.patch.yml.bak-pre-workbuddy` / `.credentials.yaml.bak-pre-workbuddy` 同级保留。装了什么、怎么验证、怎么回滚见 `DSH接入说明.md`。
+
+## 版本记录（2026-10-17 真机试跑修复）
+
+第一次真机启动（`python main.py`）时暴露的问题与修复，逐条根因见 `测试报告.md` 第 8 节：
+
+| 现象 | 根因 | 修复位置 |
+| --- | --- | --- |
+| `GET /v1/models` 与 `/api/credits/live` 500 | `_do_GET_inner()` 内的局部 `import urllib.parse` 让 `urlparse`/`parse_qs` 成为函数局部名，在 import 之前使用 → `UnboundLocalError` | `wb_gateway.py:29` 改为模块级 import，删掉函数内三处局部 import |
+| Token 统计页 500（`KeyError: 0`） | `by_account` 分桶用 dict，而 `_finalize_map()` / `_finalize_series()` 按整数下标索引 | `wb_usage.py` 两处改为容忍 list / dict 两种形状 |
+| 国际版账号聊天必 401 | 上游 URL 与 `Origin`/`Referer` 写死 `copilot.tencent.com`，拿 `www.workbuddy.ai` 的 token 打国内域名 | 新增 `chat_base_for()` / `chat_upstream_url(account)` 按区域分流；`_handle_chat_completions` 最多换 3 个账号重试（401/403 → 冷却 `AUTH_FAIL_COOLDOWN=600s`） |
+| 不知道请求用了哪个账号 | 面板只显示 uuid；响应也没有归属信息 | 聊天响应新增 `X-WorkBuddy-Account` / `-Account-Id` / `-Region` / `-Model` 头；`/panel/api/usage` 的 `by_account` label 回填昵称；概览与账号页新增「当前派发账号」卡 |
+| 登录成功后仍显示「等待登录...」 | `wb_auth.login_poll()` 的 done 返回体没有 `message`，前端只在 `d.message` 存在时覆盖文案 | `static/app.js` 的 `pollLogin` 分 done / 未 done 两路，并给完成态补「关闭」按钮 |
+| 「启用」与「已启动」分不清 | 词义重叠 | 模型 `会派发 / 不派发`、账号 `正在派发 / 备用可派发 / 暂不可用 / 已停用`、采集 `已启动 · 运行中 / 未启动` |
 
 ## 免责声明
 
