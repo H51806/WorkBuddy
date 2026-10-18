@@ -240,7 +240,10 @@ class AccountPool:
 
         available = [acc for acc in self.accounts.values() if self._is_available(acc) and acc.active]
         if not available:
-            return next(iter(self.accounts.values()), None)
+            # 一个可用的都没有就必须说「没有」，不能硬塞一个正在熔断/冷却的号：那种请求
+            # 必然失败，还会把 fail_count 越堆越高、冷却越拖越长，调用方也拿不到
+            # 「池子有问题」这个真实原因（pick() 的契约是一致返回 None）。
+            return None
 
         available.sort(key=lambda a: (a.last_used, -a.credits))
         chosen = available[0]
@@ -646,6 +649,34 @@ def _duration_seconds(value: Any, default: float = 0.0) -> float:
         return float(text)
     except (TypeError, ValueError):
         return float(default)
+
+
+def _upstream_message(payload: Any) -> str:
+    """从上游错误体里抠出人能看懂的原因。
+
+    上游把诊断信息分几层放：displayMsg（分语言的用户文案）、msg（英文简述）、
+    extError.message（模型侧拒答细节）。只回 HTTP 状态码的话，用户只会看到
+    「Upstream error: 400」，完全不知道错在哪、下一步该改什么。
+    """
+    if not isinstance(payload, dict):
+        return ""
+    for key in ("displayMsg", "display_msg"):
+        block = payload.get(key)
+        if isinstance(block, dict):
+            for lang in ("zh", "zh-hans", "zh-hant", "en"):
+                text = block.get(lang)
+                if isinstance(text, str) and text.strip():
+                    return text.strip()
+    msg = payload.get("msg")
+    if isinstance(msg, str) and msg.strip():
+        return msg.strip()
+    for key in ("extError", "ext_error"):
+        block = payload.get(key)
+        if isinstance(block, dict):
+            inner = block.get("message")
+            if isinstance(inner, str) and inner.strip():
+                return inner.strip()
+    return ""
 
 
 def resolve_model(requested: str, region: Optional[str] = None) -> Dict[str, Any]:
@@ -1408,8 +1439,22 @@ class GatewayHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
     
-    def _send_error(self, message: str, status: int = 400, error_type: str = "invalid_request_error"):
-        """发送错误响应"""
+    def _send_error(self, message: str, status: int = 400, error_type: str = ""):
+        """发送错误响应。
+
+        error_type 缺省时按状态码推断：以前 5xx 也一律标成 invalid_request_error，
+        等于告诉客户端「是你的请求错了」—— 客户端（含 DSH）据此不再重试，
+        503「账号都不可用」这种临时故障就被当成了终局错误。
+        """
+        if not error_type:
+            if status >= 500:
+                error_type = "api_error"
+            elif status in (401, 403):
+                error_type = "authentication_error"
+            elif status == 404:
+                error_type = "not_found_error"
+            else:
+                error_type = "invalid_request_error"
         self._send_json({
             "error": {
                 "message": message,
@@ -1919,10 +1964,12 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 # 上游把具体原因放在 body 的 code 里（如 11128 反探测 / 11101 非流式），
                 # 只回 HTTP 状态码会丢掉全部诊断信息。
                 upstream_code = None
+                upstream_msg = ""
                 try:
                     _ub = json.loads(error_body)
                     if isinstance(_ub, dict):
                         upstream_code = _ub.get("code")
+                        upstream_msg = _upstream_message(_ub)
                 except Exception:
                     upstream_code = None
                 is_antiprobe = e.code == 400 and (
@@ -1930,12 +1977,19 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     or "request illegal" in error_body.lower()
                     or "请求被拦截" in error_body
                 )
+                # 400 且不是反探测 = 这份请求本身不合法（模型名不存在 / 参数被模型侧拒绝）。
+                # 同一份请求体发给池子里哪个账号都是同样的 400，那不是账号的健康问题：
+                # 既不该换号重试，更不该计入熔断 —— 否则客户端连发 3 个坏请求就能把好账号
+                # 熔断 30 分钟、把整个网关打成 503（本地实测复现过）。
+                is_client_fault = e.code == 400 and not is_antiprobe
                 log.error("上游返回错误 %s（账号 %s / %s）: %s",
                           e.code, account.name or account.id[:8], account.id[:8],
                           error_body[:200])
 
-                # 记录失败（429 走限流冷却，其它累加熔断计数）
-                pool.record_failure(account.id, e.code == 429)
+                # 反探测与「客户端请求不合法」都不进熔断计数：前者有自己的短冷却，
+                # 后者与账号健康无关。只有鉴权失败 / 限流 / 上游 5xx / 网络错误才算账号的账。
+                if not is_antiprobe and not is_client_fault:
+                    pool.record_failure(account.id, e.code == 429)
 
                 # Token 统计：失败也计次，面板才能算成功率
                 record_chat_usage(
@@ -1961,6 +2015,19 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     account.cooldown_until = time.time() + ANTIPROBE_FAIL_COOLDOWN
                     continue
 
+                if is_client_fault and not headers_sent:
+                    # 换号也没用 —— 同样的请求体在哪个账号上都会被拒。直接把上游的
+                    # 真实原因回给客户端，别再回「Upstream error: 400」这种废话。
+                    log.warning("请求被上游拒绝(HTTP 400%s)，不计入账号健康: %s",
+                                "" if upstream_code is None else " code=%s" % upstream_code,
+                                upstream_msg or error_body[:120])
+                    self._send_error(
+                        "Upstream rejected the request (HTTP 400%s): %s" % (
+                            "" if upstream_code is None else " code=%s" % upstream_code,
+                            upstream_msg or "no detail provided"),
+                        e.code, "invalid_request_error")
+                    return
+
                 if is_auth_error:
                     # 401/403 = 上游不认这把凭据（过期 / 区域不对 / 换端）。让它单独
                     # 冷却一段时间，然后换下一个账号重试。
@@ -1974,13 +2041,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 if headers_sent:
                     log.warning("响应头已发出，无法再回传上游错误")
                     return
-                self._send_json({
-                    "error": {
-                        "message": f"Upstream error: {e.code}",
-                        "type": "api_error",
-                        "code": e.code
-                    }
-                }, e.code)
+                self._send_error(
+                    "Upstream error %s: %s" % (e.code, upstream_msg or "no detail provided"),
+                    e.code, "api_error")
                 return
             except Exception as e:
                 log.error(f"请求失败: {e}")

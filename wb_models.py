@@ -444,6 +444,12 @@ class ModelPrefs:
     def _merged(self, mid: str) -> Optional[ModelSpec]:
         base = _BUILTIN_BY_ID.get(mid)
         if base is None:
+            # 只认「上游列表里发现过」或「人工覆盖过」的 id。以前这里对任何字符串都凭空
+            # 造一个条目，于是 spec() 永不返回 None、resolve_requested() 里
+            # unknown -> 兜底模型 的分支成了死代码：坏模型名被原样转发给上游，白挨一个
+            # 400（11102 model ... service info not found），还被算成账号失败进而熔断。
+            if mid not in self._state.discovered and mid not in self._state.overrides:
+                return None
             base = ModelSpec(id=mid, name=mid, regions=("cn", "global"),
                              note="由上游列表发现，内置目录里没有它的身份信息")
         spec = ModelSpec(**base.to_dict())

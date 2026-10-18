@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """测试 WebUI 启动"""
 import sys
-sys.path.insert(0, r'D:\多账号管理器\WorkBuddy_统一管理器')
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from wb_webui import WebUIHandler
 from http.server import ThreadingHTTPServer

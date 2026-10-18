@@ -36,7 +36,13 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 PY = sys.executable
 
-MODULES = ["wb_gateway.py", "wb_webui.py", "wb_tasks.py", "wb_auth.py", "main.py"]
+# 语法检查覆盖全部交付模块，而不是手写几个名字 —— 以前只列了 5 个，另外 13 个
+# （含 wb_models.py / wb_checkin.py / wb_credits_fetcher.py 等）改坏了自检也看不出来。
+# 用 glob 动态取，以后新增的 wb_*.py 自动纳入；下划线前缀的临时脚本不算。
+MODULES = sorted(
+    [p.name for p in BASE_DIR.glob("wb_*.py")]
+    + ["main.py", "config.py", "browser_check.py", "selfcheck.py", "test_webui.py"]
+)
 
 PASS, FAIL, WARN = "  [OK]  ", "  [!!]  ", "  [??]  "
 
