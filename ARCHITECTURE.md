@@ -106,7 +106,7 @@ WorkBuddy_统一管理器/
 ├── devtools/                      # 开发期验证页（不对外暴露，可删）
 ├── selfcheck.py                   # 自检：py_compile 全部模块 + 页面 JS 语法 + static/ 齐全性
 ├── browser_check.py               # 真实浏览器实测：老控制台按钮 + 统一面板逐页
-├── config.py                      # 账号清单示例（网关不读这个文件）
+├── config.py                      # 账号清单示例（默认留空；网关不读它，只有采集器读 ACCOUNTS）
 ├── config.example.json            # 网关配置模板（只含真正生效的字段，可 git 提交）
 ├── config.json                    # 用户真实配置（.gitignore 排除）
 ├── README.md / ARCHITECTURE.md    # 快速上手 / ← 本文档
@@ -127,7 +127,7 @@ WorkBuddy_统一管理器/
 | 模块 | 行数 | 职责 |
 |---|---|---|
 | `main.py` | 185 | 单一入口：以子进程启动 `wb_gateway.py`（网关 7863，**面板也由它托管**）；后台线程用 `ThreadingHTTPServer` 起老控制台（8789，只留 `/api/*`，根路径 302 跳面板）；1.5 秒后打开浏览器 |
-| `wb_gateway.py` | 2712 | **心脏**。OpenAI 兼容网关 + `Account` / `AccountPool` + 选号 + 冷却/熔断 + SSE 透传/聚合 + 面板 HTTP API + 静态资源托管 |
+| `wb_gateway.py` | 2911 | **心脏**。OpenAI 兼容网关 + `Account` / `AccountPool` + 选号 + 冷却/熔断 + SSE 透传/聚合 + 面板 HTTP API + 静态资源托管 |
 | `wb_webui.py` | 1267 | **老控制台**（`:8789`）：只保留 `/api/*` 数据接口与 `/legacy` 旧界面 |
 | `static/` | 8 个文件 | **统一面板本体**：`index.html` + `app.css` + `app.js` + `manifest.webmanifest` + `sw.js` + 3 个图标 |
 | `wb_ops.py` | 258 | 采集进程控制（启停 / 日志 / 状态）与四项自检（Python / 网关 / 依赖 / 文件） |
@@ -143,7 +143,7 @@ WorkBuddy_统一管理器/
 | `wb_playwright_transport_patch.py` | 202 | Windows 下修复 `asyncio.create_subprocess_exec` 无法创建重叠管道的问题（须在 import playwright 之前调用） |
 | `selfcheck.py` | 332 | `py_compile` 全部模块 + 页面 / `static/*.js` 语法检查 + `static/` 交付文件齐全性 |
 | `browser_check.py` | 183 | 用真实浏览器打开旧控制台点按钮，再逐页走统一面板的 11 个视图 |
-| `config.py` | 51 | 账号清单与默认值示例——**网关不读它**（真正生效的是 `config.json`） |
+| `config.py` | 50 | 账号清单示例（默认留空）——**网关不读它**（真正生效的是 `config.json`）；只有 `wb_credits_fetcher.py` 读 `ACCOUNTS` |
 | `config.example.json` | 模板 | 只含真正会被读取的配置键（`DEFAULT_CONFIG` 的裁剪版） |
 
 ---
@@ -340,7 +340,7 @@ DESKTOP_PRODUCT         = "SaaS"
 | 可视化 | 嵌入式 Go 面板 | 自研静态面板 `static/`（11 视图，PWA） |
 | 自动排程 | 内置调度器（签到 / 旅行 / 活跃 / 保活） | **没有**：全部靠面板点按钮触发 |
 | 请求改写 | 提示词体系 + 指纹脱敏 + UA 可配 | **没有**：只强制 `stream=true` |
-| 错误分类 | 429 / 402 / 404 / `6004` / `11128` 分档 + 退避封顶 | **没有**：429 → 冷却；其它 → 失败计数 → 熔断 |
+| 错误分类 | 429 / 402 / 404 / `6004` / `11128` 分档 + 退避封顶 | **部分有**：429 → 冷却；`11128` 反探测单独处理（重发 2 次 → 换号 → 冷却 60s）；`400` 客户端错不惩罚账号；其余 → 失败计数 → 熔断。`6004` / `402` / `404` 分档与退避封顶仍然没有 |
 | 状态存储 | 本地 JSON + 可选 Redis 镜像 | 本地 JSON（`data/state.json`），无 Redis |
 | 自检 | 无 | `selfcheck.py` + `browser_check.py` |
 | 依赖 | Go 标准库 | Python 标准库 + Playwright（仅采集 / 实测用） |

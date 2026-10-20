@@ -127,7 +127,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 能力 | 说明 |
 |---|---|
 | **统一面板（自研 WebUI）** | `static/` 的 `index.html` + `app.css` + `app.js`，由网关在 `http://127.0.0.1:7863/panel/` 直接托管：**11 个视图**（概览 / 账号池 / 账号管理 / 模型 / Token 统计 / 积分统计 / 任务中心 / 实时日志 / 诊断 / 签到日志 / 设置）。无构建步骤、无 CDN 依赖，改完刷新页面即生效 |
-| **移动端（PWA + 安卓外壳）** | 响应式布局（≤900px 侧栏变抽屉 + 五格底栏，≤520px 单列）；`static/manifest.webmanifest` + `static/sw.js` 支持「添加到主屏幕」；另附 `android-app/` WebView 外壳工程（`build_apk.bat` 打包） |
+| **移动端（PWA + 安卓外壳）** | 响应式布局（≤900px 侧栏变抽屉 + 五格底栏，≤520px 单列）；`static/manifest.webmanifest` + `static/sw.js` 支持「添加到主屏幕」；`android-app/` WebView 外壳工程（`build_apk.bat` 打包）**不在本仓库内**，见下节 |
 | **用量统计** | `data/usage.json` 按小时分桶，Token 统计页给出堆叠柱 + 请求数双轴趋势图，以及「按模型 / 客户端 / 区域 / 账号」四张表与 User-Agent 排行 |
 | **浏览器内 OAuth 添加账号** | 面板「账号管理」页扫码完成设备授权 → 凭证落盘 `auths/` → **热加载进池（免重启）** |
 | **桌面快照发现导入** | 扫描桌面上的 `login_state_*.json` / `identity_*.json`，判定「可导入 / 只有网页 Cookie / 仅身份信息」，可一键导入 |
@@ -149,7 +149,7 @@ WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾
 | 定时调度器（签到 09/21、猫猫旅行、活跃上报、token 保活、夜猫子） | **没有**。`main.py` 只做「建目录 → 起网关 → 起老控制台 → 开浏览器」；签到 / 任务 / 保活 / 采集全靠面板点按钮或手动跑脚本（`schedule.*` 是预留键，无读取者） |
 | 系统提示词体系（`prompt.mode` custom / append / passthrough） | **没有**。客户端 `messages` 原样转发；出站唯一的改写是「上游只接受流式」→ 强制 `stream: true`（wb_gateway.py:1764） |
 | 出站 UA / 指纹可配、请求体净化脱敏 | **没有**。UA 是代码内常量（wb_tasks.py:40-43），请求体不做净化 / 脱敏，`upstream.user_agent` 是死键 |
-| 错误码精细分类（`6004` 模型级限流、`11128` 反探测、`402` / `404` 分档、指数退避封顶） | **没有**。只有一条通用规则：HTTP 429 → 该账号计一次限流冷却；其它失败累加 `fail_count`，连续 3 次熔断（wb_gateway.py:304-324） |
+| 错误码精细分类（`6004` 模型级限流、`11128` 反探测、`402` / `404` 分档、指数退避封顶） | **部分有**。`11128` 反探测已单独处理（原地重发 2 次 → 换号 → 该账号冷却 60s）；`400` 客户端请求错不惩罚账号；其余仍是「HTTP 429 → 限流冷却，其它失败累加 `fail_count`，连续 3 次熔断」（wb_gateway.py:304-324、1975-2050）。`6004` 模型级冷却、`402`/`404` 分档、指数退避封顶仍然**没有** |
 | `IsEnterprise` 判定（企业号跳过部分调用、额度换算） | **没有**。只把 `enterpriseId` 透传成请求体字段与 `X-Enterprise-Id` / `X-Tenant-Id`（wb_auth.py:124、wb_checkin.py:232） |
 | Redis（Upstash）状态镜像、成本分层探索、在途并发上限 | **没有**。池状态落 `data/state.json`；`upstash.*`、`pool.max_in_flight`、`pool.degrade_*`、`pool.cost_explore_interval` 都没有读取者 |
 | 「今天已签到」幂等识别 | **有**：HTTP 400 且 `code == 10001`，或 message 含「已签到 / 今天已签到」（wb_checkin.py:271） |
@@ -194,6 +194,14 @@ flowchart LR
 - **Python 3.10 及以上**（推荐 3.11 / 3.12 / 3.13，64 位）
 - Windows 10+ / macOS 12+ / Linux 均可；本项目是**纯 Python 实现**，无 Go / Docker 依赖
 - 一个或多个已注册的 CodeBuddy 账号，用于 OAuth 登录
+
+**第三方依赖只有一个，而且是可选的**：网关、面板、任务、签到全部只用标准库（`http.server` / `urllib` / `json` …），`python main.py` 起来就能用。
+
+| 依赖 | 什么时候才需要 | 装法 |
+|---|---|---|
+| `playwright` | 只有**积分采集**（`wb_credits_fetcher.py`，面板「实时日志」页拉起）和**浏览器自检**（`browser_check.py`）需要；不采集积分的话可以完全不装 | `pip install playwright`，然后 `python -m playwright install msedge`（默认走 Edge 通道） |
+
+仓库里**没有 `requirements.txt`**——需要采集时按上表手动装，缺依赖只影响这两个脚本，不影响网关本身。
 
 ### 方式一：Windows 一键启动（推荐）
 
@@ -374,14 +382,18 @@ Python 版**只读一个**环境变量：
 
 ### 冷却、熔断与失败计数
 
-只有两条通用规则（没有区分上游错误码的专项处置）：
+上游失败按**原因**分成四档，只有第一档与第二档会影响账号健康（`wb_gateway.py:1975-1996`）：
 
-| 触发 | 处置 | 恢复 |
-|---|---|---|
-| 限流（被判定为 rate limit） | 软冷却 `acc.cooldown_until = now + cooldown.soft_rate`（默认 600s，`config.json` 现值见配置说明） | 到期自动恢复 |
-| 连续失败 `fail_count ≥ pool.breaker_threshold`（默认 3） | 熔断 `acc.breaker_until = now + pool.breaker_cooldown`（默认 1800s，`config.json` 现值 `30m`） | 到期自动恢复 |
+| 触发 | 处置 | 影响账号健康 | 恢复 |
+|---|---|---|---|
+| 限流（`429`，被判定为 rate limit） | 软冷却 `acc.cooldown_until = now + cooldown.soft_rate`（默认 600s） | 是（计一次失败） | 到期自动恢复 |
+| 其它上游失败 | `fail_count += 1`；达到 `pool.breaker_threshold`（默认 3）即熔断 `breaker_until = now + pool.breaker_cooldown`（默认 `30m`） | 是 | 到期自动恢复，或任意一次成功清零 |
+| **客户端请求本身错**（HTTP 400 且不是反探测，例如模型名非法 / `messages` 为空 / 参数不合法） | 直接返回带上游真实原因的 400，**不换号、不重试** | **否** | — |
+| **反探测拦截**（HTTP 400 且 `code=11128` / `request illegal` / 请求被拦截） | 原地等 0.8s 重发（最多 2 次）；仍被拦则该账号冷却 60s 并换号 | **否** | 60s 后重新参与选号 |
 
-任意一次成功都会把 `fail_count` 清零。**没有** 402/404/`code=6004`/`11101` 的分类处置，**没有** 指数退避、软冷却封顶、硬冷却到次日、也**没有** Redis 镜像——上游错误的处理就是「记一次失败 + 上面的冷却」以及 `log.error` 打出上游返回的前 200 字节。
+这条分档是必须的：早期版本对所有上游 `HTTPError` 无条件记失败，于是**客户端连发 3 个坏请求就能把池里每个账号都熔断 30 分钟**，全站 503。判定依据是「这个错误换个账号重发还有意义吗」——客户端请求错在哪个号上都会错，反探测则是上游对单个账号的临时拦截。
+
+任意一次成功都会把 `fail_count` 清零。仍然**没有** `402`/`404`/`code=6004` 的模型级冷却、**没有**指数退避封顶、**没有**硬冷却到次日、也**没有** Redis 镜像。
 
 ### 定时与自动任务：本分支没有内置调度器
 
@@ -423,7 +435,7 @@ Python 版**只读一个**环境变量：
 - 手机/平板（≤900px）：左侧导航收起为抽屉（☰ 打开，点遮罩或 Esc 关闭），底部出现「概览 / 账号 / Token / 日志 / 设置」五格底栏；≤520px 进一步压缩为单列卡片。
 - **装到手机主屏（PWA）**：手机与电脑同一局域网，浏览器打开 `http://<电脑内网IP>:7863/panel/#key=<api_key>` → 菜单里「添加到主屏幕」。`static/manifest.webmanifest`（standalone、竖屏、三个捷径：Token 统计 / 实时日志 / 账号管理）与 `static/sw.js`（预缓存壳文件；`/panel/api/*`、`/v1/*`、`/tasks*` 一律走网络不缓存）由网关托管。
   > 手机要能访问，需把 `config.json` 的 `listen` 从 `127.0.0.1:7863` 改成 `0.0.0.0:7863` 并放行防火墙；同时务必设置 `api_key`（局域网内也建议开）。
-- **Android App**：`android-app/` 是完整的 Android 工程（WebView 壳 + 面板离线资源），双击 `android-app/build_apk.bat` 即可用本机 JDK 17 + Android SDK 打包（脚本会检查环境并提示缺什么），产物在 `android-app/out/`。不想打包就直接用上面的 PWA——两者共用同一套网关接口，界面也同源。
+- **Android App**：`android-app/` 是完整的 Android 工程（WebView 壳 + 面板离线资源），双击 `android-app/build_apk.bat` 即可用本机 JDK 17 + Android SDK 打包（脚本会检查环境并提示缺什么），产物在 `android-app/out/`。**这个目录不在本仓库里**（`.gitignore` 之外，属于本地附加工程，未随源码发布）；克隆下来只有本目录时，请直接用上面的 PWA——两者共用同一套网关接口，界面也同源。
 
 ### 面板专属接口（`/panel/api/*`）
 
@@ -471,7 +483,10 @@ Python 版**只读一个**环境变量：
 
 - 出站请求强制 `stream: true`；客户端要**流式**时逐 1 KiB chunk **原样透传**（不做帧重建、不剥字段、不补 `data: [DONE]`），边传边用 `StreamUsageTap` 抓最后一帧的 usage。
 - 客户端要**非流式**时，`aggregate_sse_completion()` 把上流 SSE 聚合成一个 `chat.completion`（正文拼接、`tool_calls` 按 index 合并、带 usage）再返回。
-- 上游返回 HTTP 错误码：`429` 会被当成限流记一次失败（可能触发软冷却 / 熔断），响应体是 `{"error":{"message":"Upstream error: <code>","type":"api_error","code":<code>}}`；其它异常统一 500 `Request failed: …`。响应头已发出（流式已开始）时错误只写日志。
+- 上游返回 HTTP 错误码时，响应体带上游真实原因：`{"error":{"message":"Upstream error <code>: <上游 displayMsg.zh / msg / extError.message>","type":"api_error","code":<code>}}`——取不到原因时 message 里写 `no detail provided`，不再只回一个裸状态码（`_upstream_message()`，`wb_gateway.py:654`）。
+- `400` 且被判定为**客户端请求错**时返回 `{"type":"invalid_request_error"}`，且不计入账号失败；被判定为**反探测**时先原地重发再换号（见上一节表格）。
+- 错误响应的 `type` 现在按状态码推断（`wb_gateway.py:1442`）：`≥500` → `api_error`、`401/403` → `authentication_error`、`404` → `not_found_error`、其余 → `invalid_request_error`。这意味着 `503`（账号全部不可用）不会再被客户端当成「你的请求错了」而放弃重试。
+- 其它异常统一 500 `Request failed: …`；响应头已发出（流式已开始）时错误只写日志。
 - 每次请求（成功与失败）都会落一条用量记录；成功还会 `record_success()` 把 `fail_count` 清零。
 
 ### 上游端点（本分支真正调用的）
@@ -504,7 +519,7 @@ Python 版**只读一个**环境变量：
 
 ### 请求日志与用量统计
 
-- stdout 只有 Python `logging`：格式 `%(asctime)s [%(levelname)s] %(message)s`，外加每个 HTTP 请求一行访问日志 `<地址> - <请求行>`（`wb_gateway.py:1363`）。**没有表格化的 TTFB / tok/s 请求日志，也不落盘日志文件。**
+- stdout 只有 Python `logging`：格式 `%(asctime)s [%(levelname)s] %(message)s`，外加每个 HTTP 请求一行访问日志 `<地址> - <请求行>`（`wb_gateway.py:1419`）。**没有表格化的 TTFB / tok/s 请求日志，也不落盘日志文件。**
 - 对应的可观测性在面板「Token 统计」页：按小时分桶落 `data/usage.json`（`wb_usage`，`flush_interval_seconds = 5`、`retention_days = 90`），可按模型 / 客户端 / 区域 / 账号聚合，另有最近见过的 User-Agent。
 - 敏感度：日志与用量文件都不含 token 明文（详见[安全与合规](#安全与合规)）。
 
@@ -532,7 +547,7 @@ python selfcheck.py --online
 python browser_check.py
 ```
 
-> 冒烟测试报告见 `WorkBuddy_统一管理器/测试报告.md`（45 项断言全通过 / 0 JS 错误，含逐条结果与真机收口命令）。
+> 冒烟测试报告见仓库根目录的 `测试报告.md`（45 项断言全通过 / 0 JS 错误，含逐条结果与真机收口命令）。
 
 ### 账号管理
 
@@ -545,7 +560,7 @@ python browser_check.py
 | 路径 | 内容 |
 |---|---|
 | `config.json` | **真正生效**的网关配置（`listen` / `api_key` / `auth_dir` / `state_file` / `upstream` / `pool` / `cooldown` / `models` / `usage` / `schedule`）；面板「设置」页只读预览，`POST /panel/api/config` 可改写并落盘，但 `api_key` 这类模块级取值要重启才生效 |
-| `config.py` | 老式账号配置（`ACCOUNTS`）与 `GATEWAY` / `CONSOLE` / `COLLECTOR` / `AUTOTASKS` 常量；**网关不读它** |
+| `config.py` | 老式账号配置（`ACCOUNTS`），**仓库里默认留空**；`GATEWAY` / `CONSOLE` / `COLLECTOR` / `AUTOTASKS` 是历史遗留常量、**没有任何代码读取**（端口写在各模块常量里）。网关不读它，只有积分采集器 `wb_credits_fetcher.py` 会读 `ACCOUNTS` |
 | `config.example.json` | 配置模板 |
 | `auths/workbuddy-<uid>.json` | OAuth 凭据（明文 `accessToken` / `refreshToken`；写盘方式是 tmp 文件 + replace） |
 | `data/state.json` | 账号池状态：`current_account_id` / `sticky_sessions` / 每账号计数与冷却 |
@@ -592,11 +607,16 @@ python browser_check.py
 
 ### 上游报 429 / 被限流了怎么办？
 
-网关按 **HTTP 状态码**处理，不做错误码细分（`wb_gateway.py:1846`）：
+网关按**失败原因**分档处理（`wb_gateway.py:1975-2050`，完整表格见「冷却、熔断与失败计数」）：
 
 - `429` → 记为一次失败，并给该账号设软冷却 `cooldown.soft_rate`（默认 600s）
 - 连续失败累计到 `pool.breaker_threshold`（默认 3）→ 熔断 `pool.breaker_cooldown`（默认 1800s）
+- **`400` 客户端请求错**（模型名不对、`messages` 为空…）→ 把上游原话回给你，**不惩罚账号**
+- **`400` 反探测**（`code=11128`）→ 原地重发 2 次，仍不行就换号；该账号冷却 60s，也不计入熔断
 - 任意一次成功清零计数；冷却与熔断到期自动恢复
+
+> 之前遇到过的 `Upstream error: 400` 现在会带上游真实原因，例如
+> `Upstream rejected the request (HTTP 400 code=11133): 模型无法处理此请求，请重试`。
 
 **没有**按 `code=6004` 解析「将在 … 重置」、**没有**按模型切分冷却、**没有**指数退避或封顶——上游 Go 版那套模型级冷却语义在本分支不存在。面板「账号池」页会列出每个不可用账号的原因（停用 / 冷却中 / 熔断中 / 积分不足）。
 
@@ -639,6 +659,8 @@ UA 在本分支里是**代码常量**（`wb_tasks.UA_CLI` / `UA_DESKTOP`、`wb_a
 | 模型名兜底 `resolve_model`（未知 / 隐藏 / 跨区替换） | `wb_gateway.py:637`；内置目录 `wb_models.py:94-138`（`_BUILTIN`） |
 | 无可用账号 → 503 + 账号(原因) 名单 | `wb_gateway.py:1740-1753` |
 | `429` → 软冷却 `cooldown.soft_rate`（默认 600s） | `wb_gateway.py:1846`（`is_rate_limit`）、`:563`（配置）、`:317-319`（落冷却） |
+| 客户端 `400` / 反探测 `11128` 不计入账号失败 | `wb_gateway.py:1975`（`is_antiprobe`）、`:1984`（`is_client_fault`）、`:1991-1992`（有条件 `record_failure`）、`:2018-2045`（重发 / 换号 / 真实原因） |
+| 未知模型名换成兜底模型（不再透给上游） | `wb_models.py:447-452`（`_merged` 对未知 id 返回 `None`）、`:784`（`resolve_requested` 的 unknown 分支） |
 | 熔断：`fail_count ≥ breaker_threshold`（默认 3）→ `breaker_cooldown`（默认 1800s） | `wb_gateway.py:321-324`、`:558-562`（配置） |
 | 成功清零失败计数 | `wb_gateway.py:302`（`record_success`） |
 | 四种分配策略 `priority` / `round-robin` / `balanced` / `sticky` | `wb_pool_policy.py:28-42`；选号主逻辑 `:351-447`（`select`） |
@@ -666,7 +688,27 @@ UA 在本分支里是**代码常量**（`wb_tasks.UA_CLI` / `UA_DESKTOP`、`wb_a
 `- id: llm-pi-ai` → `config:` → `providers:` 下（与 `sensenova:` 同级），凭据 `WORKBUDDY_API_KEY` 写在 `C:\Users\<你的用户名>\.dsh\.credentials.yaml` 的 `refs:` 段；
 两份还原点 `cordis.patch.yml.bak-pre-workbuddy` / `.credentials.yaml.bak-pre-workbuddy` 同级保留。装了什么、怎么验证、怎么回滚见 `DSH接入说明.md`。
 
-## 版本记录（2026-10-17 真机试跑修复）
+## 版本记录
+
+### 2026-10-20：错误语义与账号健康修复 + 开箱可靠性
+
+这一版修的都是「会把好账号拖下水」或「让人看不懂发生了什么」的问题，逐条都能在本仓库代码里指到行号。
+
+| 现象 | 根因 | 修复位置 |
+| --- | --- | --- |
+| 客户端发几个坏请求（模型名不存在、`messages` 为空）之后，**整个网关开始 503**，要等 30 分钟才恢复 | `except HTTPError` 里对**任何**上游错误都无条件 `pool.record_failure()`，3 次就把两个账号都熔断——客户端自己的错被算到账号头上 | 拆成 `is_antiprobe` / `is_client_fault` 两档，只有真·账号侧失败才记失败：`wb_gateway.py:1975`、`:1984`、`:1991-1992` |
+| 报错只有 `{"message":"Upstream error: 400"}`，看不出上游到底说了什么 | 错误体只取了 `e.code`，上游 `displayMsg` / `msg` / `extError` 全被丢掉 | 新增 `_upstream_message()`（`wb_gateway.py:654`），错误响应带上游原文：`wb_gateway.py:2018-2045` |
+| 上游反探测（`code=11128`）被当成普通失败，还会先把账号熔断 30 分钟再走重发 | 反探测没有独立分支，`record_failure` 在重发之前就执行了 | 11128 单独处理：原地重发 2 次（0.8s 间隔）→ 仍被拦则换号，该账号冷却 60s，不计入熔断（`ANTIPROBE_*` 常量在 `wb_gateway.py:54-56`） |
+| 账号池全不可用时返回 503，却被标成 `invalid_request_error`，客户端以为是自己请求错了、直接放弃重试 | `_send_error` 默认 `error_type="invalid_request_error"`，5xx 也照旧 | 缺省时按状态码推断：≥500 → `api_error`、401/403 → `authentication_error`、404 → `not_found_error`（`wb_gateway.py:1442`） |
+| 请求了不存在的模型名，名字被原样转给上游，白挨一个 400 还连累账号 | `wb_models._merged()` 对任何未知 id 凭空造条目，`spec()` 永不返回 `None`，`resolve_requested()` 的「未知 → 兜底模型」分支成了死代码 | `_merged()` 只认内置 / 已发现 / 已覆盖的 id：`wb_models.py:447-452`；未知模型名现在换成 `deepseek-v4-flash` 并在日志里写明替换原因 |
+| 自检只覆盖 5 个模块，新加的文件语法错了也发现不了 | `selfcheck.MODULES` 是手写清单 | 改成 `glob("wb_*.py")` 全量收集，18 个模块 + `static/` JS 一起查（`selfcheck.py:39-45`） |
+| 克隆下来直接跑，采集器会拿示例账号去扫码登录 | `config.py` 里带一条假账号（`工作号 / 139****9999`） | `ACCOUNTS` 默认留空并全部注释掉；采集器遇到空账号时给出可操作提示而非一句「没有定义 ACCOUNTS 列表」（`wb_credits_fetcher.py` 的 `load_config()`） |
+| 仓库目录里双击 `一键启动.bat` 直接报 `[ERROR] App folder not found` | 启动器只会找 `%~dp0WorkBuddy_*` 子目录，而本仓库根目录就是应用目录 | 先认当前目录的 `main.py`，找不到再退化去找子目录；新增 `.gitattributes` 强制 `.bat` 保持 CRLF |
+| 7863 端口被上一次的网关占着时，只打印一句「网关启动失败」 | 没区分「端口占用」和「真的没起来」 | `main.py` 新增 `port_in_use()`，占用时直接给出 `netstat -ano` + `findstr :7863` 查 PID、`taskkill /PID <PID> /F` 的下一步 |
+
+回归方式：`python selfcheck.py --online`（18 模块语法 + 4 段 JS + 16 个 HTTP 端点）全绿；坏请求不再影响账号健康、错误信息带上游原文、未知模型走兜底，均已在本地实测。
+
+### 2026-10-17：真机试跑修复
 
 第一次真机启动（`python main.py`）时暴露的问题与修复，逐条根因见 `测试报告.md` 第 8 节：
 

@@ -1,0 +1,19 @@
+# 批处理文件必须保持 CRLF：cmd.exe 解析 LF 换行的 .bat 会逐行报错、
+# 甚至把 if/goto 拆错，导致「一键启动.bat」双击后直接闪退。
+# 有了这条规则后，无论谁在什么平台检出/提交，工作区里的 .bat 都是 CRLF。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 其余文本文件统一 LF，避免整文件 diff 噪音
+*.py   text eol=lf
+*.md   text eol=lf
+*.json text eol=lf
+*.yml  text eol=lf
+*.js   text eol=lf
+*.css  text eol=lf
+*.html text eol=lf
+
+# 图片按二进制处理
+*.png binary
+*.jpg binary
+*.ico binary

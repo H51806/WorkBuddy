@@ -59,6 +59,7 @@ workbuddy-manager:
 
 ```bat
 双击  D:\多账号管理器\一键启动.bat
+:: 或者，仓库克隆到任意位置后，直接双击仓库根目录里的 一键启动.bat
 ```
 
 它会拉起网关（`http://127.0.0.1:7863`）并打开统一面板 `http://127.0.0.1:7863/panel/`。网关关掉时，DSH 里选这个 provider 会报连接失败（ECONNREFUSED）。
@@ -84,6 +85,8 @@ curl -s http://127.0.0.1:7863/v1/chat/completions \
 | DSH 报 `MISSING_CREDENTIAL` | `apiKeyEnv` 解析不到值 | 检查 `.credentials.yaml` 的 `refs.WORKBUDDY_API_KEY` 是否还在；或改用 `setx WORKBUDDY_API_KEY test_key` 并重开 DSH |
 | 网关返回 401 `authentication_error` | DSH 发的 key 与 `config.json` 的 `api_key` 不一致 | 两边改成同一个值（`config.json` 改完要重启网关） |
 | `ECONNREFUSED 127.0.0.1:7863` | 网关没启动 | 先双击 `一键启动.bat` |
+| `Upstream rejected the request (HTTP 400 code=…): …` | 请求本身有问题（模型名不存在、`messages` 为空、参数被拒），**不是账号坏了** | 按冒号后的上游原话改请求；这次不会影响账号健康。旧版本这时只会显示 `Upstream error: 400` |
+| 短时间连续报 400 后一路 503 | 旧版本会把客户端坏请求算成账号失败并熔断 | 已修；若跑的是旧代码，重启网关（熔断状态只存在内存里） |
 | 503 `No available accounts: …` | 账号池为空 / 全部不可用 | 面板「账号管理」页扫码登录；或等冷却结束 |
 | DSH 里模型名和请求的不一样 | 网关的 `resolve_model` 兜底（未知 / 跨区 / 被隐藏的模型会换成可用模型，日志有「模型 X -> Y」） | 正常行为；想用某模型请在面板「模型」页启用它 |
 | 改了路由但没生效 | `providers` 是**装载期**配置 | 完全退出 DSH 再重开（不是刷新页面） |

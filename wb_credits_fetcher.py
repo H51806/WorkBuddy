@@ -130,7 +130,17 @@ def load_config():
         exec(compile(src, str(CONFIG_FILE), "exec"), namespace)
         accounts = namespace.get("ACCOUNTS", [])
         if not accounts:
-            log.error("config.py 中没有定义 ACCOUNTS 列表")
+            log.error("config.py 的 ACCOUNTS 是空的 —— 没有可采集的账号")
+            try:
+                # Windows 控制台可能是 GBK，直接 print 中文会乱码
+                sys.stdout.reconfigure(errors="replace")
+            except Exception:
+                pass
+            print("\n[提示] 积分采集依赖 config.py 里的 ACCOUNTS 清单，当前为空。")
+            print("       1) 如果你只想管理账号/聊天：不用跑采集器，直接在")
+            print("          http://127.0.0.1:7863/panel/ 的「账号管理」页扫码登录即可；")
+            print("       2) 如果你要采集积分：打开 config.py，把 ACCOUNTS 里注释掉的")
+            print("          条目取消注释并填入你的账号，然后重新运行。")
             sys.exit(1)
         return accounts
     except SyntaxError as e:

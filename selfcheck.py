@@ -36,6 +36,14 @@ from pathlib import Path
 BASE_DIR = Path(__file__).resolve().parent
 PY = sys.executable
 
+# Windows 控制台默认是 GBK，代码页 936 编不出 '✓' 这类字符 —— 不打这一行，
+# 自检在「全部通过」的最后一句 print 上抛 UnicodeEncodeError、退出码 1，
+# 看起来像检查失败（实际是通过的）。stdout 被重定向时 reconfigure 不存在，故 try 包住。
+try:
+    sys.stdout.reconfigure(errors="replace")
+except Exception:
+    pass
+
 # 语法检查覆盖全部交付模块，而不是手写几个名字 —— 以前只列了 5 个，另外 13 个
 # （含 wb_models.py / wb_checkin.py / wb_credits_fetcher.py 等）改坏了自检也看不出来。
 # 用 glob 动态取，以后新增的 wb_*.py 自动纳入；下划线前缀的临时脚本不算。

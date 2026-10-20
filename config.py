@@ -1,25 +1,31 @@
 #!/usr/bin/env python3
 """
-WorkBuddy 统一管理器 - 账号配置
+WorkBuddy 统一管理器 - 账号配置（示例文件）
 ================================
-⚠️ 本文件包含敏感信息，请勿上传到公开仓库
+本文件只被「积分采集器」wb_credits_fetcher.py 读取；API 网关与统一面板读的是
+config.json（不存在时按内置默认值自动创建），网关不读本文件。
 
-格式：每个账号是一个 { ... } 块
+下面的 GATEWAY / CONSOLE / COLLECTOR / AUTOTASKS 是历史遗留示例常量，
+当前没有任何代码读取它们（端口是各模块的常量），改它们不会改变行为。
+
+填入真实账号/密码后本文件就含敏感信息，请勿提交到公开仓库。
+仓库里的这一份只保留注释掉的示例条目。
 """
 
 # ===== 账号列表 =====
+# 默认留空：填了这里才会被「积分采集器」(wb_credits_fetcher.py) 当成待采集账号。
+# 留空时采集器会明确提示「没有配置账号」并退出（不再拿示例数据去扫码）。
 ACCOUNTS = [
-    {
-        "name": "工作号",
-        "phone": "139****9999",
-        "login_method": "wechat",  # wechat 或 phone
-    },
-    # 添加更多账号：复制上面的块，修改 name 和 phone
+    # {
+    #     "name": "工作号",                 # 别名，积分回填时按它匹配
+    #     "phone": "139****9999",          # 显示用脱敏手机号
+    #     "login_method": "wechat",        # wechat 或 phone
+    # },
     # {
     #     "name": "小号",
     #     "phone": "137****7777",
     #     "login_method": "phone",
-    #     "phone_number": "13712345678",
+    #     "phone_number": "13712345678",   # phone 登录需填完整手机号
     #     "password": "your_password",
     # },
 ]
@@ -43,7 +49,7 @@ COLLECTOR = {
     "browser_channel": "msedge",  # 使用 Edge 浏览器
 }
 
-# ===== 自动任务配置 =====
+# ===== 自动任务配置（未使用：本分支没有调度器，见 README「定时与自动任务」）=====
 AUTOTASKS = {
     "enabled": True,
     "checkin_times": ["09:00", "21:00"],  # 每日签到时间

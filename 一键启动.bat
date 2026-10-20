@@ -7,10 +7,11 @@ rem  WorkBuddy Manager -- the ONLY launcher you need.
 rem  (ASCII-only on purpose: cmd.exe mis-parses non-ASCII .bat)
 rem ============================================================
 
-rem -- find the app folder (WorkBuddy_*) next to this launcher --
+rem -- locate main.py: this folder first (repo layout), then a WorkBuddy_* child --
 set "APPDIR="
-for /d %%d in ("%~dp0WorkBuddy_*") do set "APPDIR=%%d"
-if not defined APPDIR (echo [ERROR] App folder WorkBuddy_* not found next to this launcher. & pause & exit /b 1)
+if exist "%~dp0main.py" set "APPDIR=%~dp0"
+if not defined APPDIR for /d %%d in ("%~dp0WorkBuddy_*") do if exist "%%d\main.py" set "APPDIR=%%d"
+if not defined APPDIR (echo [ERROR] main.py not found: neither in this folder nor in a WorkBuddy_* subfolder. & pause & exit /b 1)
 cd /d "%APPDIR%"
 if not exist "main.py" (echo [ERROR] main.py not found in "%APPDIR%". & pause & exit /b 1)
 
