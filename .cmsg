@@ -1,0 +1,11 @@
+﻿fix: 采集器配置回归 + README 品牌与介绍校正
+
+- 89c83e0 的「配置示例化」把本地 configs/config.py 的 ACCOUNTS 一并注释空了，
+  积分采集器自 10-20 起报「ACCOUNTS 是空的」无法运行。模板独立为
+  configs/config.example.py（入库），configs/config.py 回归本地私有并加入 .gitignore
+  （与 wb_credits_fetcher 文档自述的「不上传」一致），用户账号清单已恢复。
+- README：大标题改回面板实际名称「WorkBuddy 统一管理器」；「腾讯 CodeBuddy」
+  统一为「WorkBuddy / CodeBuddy」双品牌（上游实测覆盖 copilot.tencent.com /
+  workbuddy.cn / codebuddy.cn / workbuddy.ai）；简介补齐「网关 + 多账号管理工具」
+  定位与积分采集能力；特性行补「积分自动采集」。
+- 数字核实：「11 视图」「成长任务 16/17」与代码一致（17 条任务 = 16 自动 + 1 手动），保留。

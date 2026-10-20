@@ -2,11 +2,11 @@
   <img src="https://raw.githubusercontent.com/DGZSbot/ai-icon/refs/heads/main/WorkBuddy.png" alt="WorkBuddy2API" width="120">
 </p>
 
-<h1 align="center">WorkBuddy2API Panel</h1>
+<h1 align="center">WorkBuddy 统一管理器</h1>
 
 <p align="center">
-  <b>把腾讯 CodeBuddy 账号变成 OpenAI 兼容 API 的多账号网关 · 附自研统一面板</b><br>
-  统一面板（11 视图 · 手机 PWA）· OAuth 设备授权登录 · 账号池四策略 · 熔断与冷却 · 会话粘性 · <b>成长任务一键完成（16/17）</b> · 签到与收益账本 · 实时日志 / 诊断 · 流式 / 非流式
+  <b>把腾讯 WorkBuddy / CodeBuddy 账号变成 OpenAI 兼容 API 的多账号管理网关 · 自研统一面板 + 积分采集器</b><br>
+  统一面板（11 视图 · 手机 PWA）· OAuth 设备授权登录 · 账号池四策略 · 熔断与冷却 · 会话粘性 · <b>成长任务一键完成（16/17）</b> · 积分自动采集 · 签到与收益账本 · 实时日志 / 诊断 · 流式 / 非流式
 </p>
 
 <p align="center">
@@ -30,7 +30,7 @@
 
 ## 使用声明（必读）
 
-本项目（含上游 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)，下同）的开发初衷只有一个：**方便个人管理自己的 CodeBuddy 账号**——自动签到、保活、给自己的本地工具提供一个 OpenAI 兼容入口。它是免费、开源、按「原样」提供的个人自用工具。
+本项目（含上游 [Sliverkiss/workbuddy2api](https://github.com/Sliverkiss/workbuddy2api)，下同）的开发初衷只有一个：**方便个人管理自己的 WorkBuddy / CodeBuddy 账号**——自动签到、保活、给自己的本地工具提供一个 OpenAI 兼容入口。它是免费、开源、按「原样」提供的个人自用工具。
 
 近期我们发现有人将本项目用于以下行为：
 
@@ -40,8 +40,8 @@
 我们对上述行为**表达最强烈的反对**，并声明如下：
 
 1. **一切商用 / 售卖行为与本项目及作者无关。** 本项目不授权、不支持、不参与任何面向公众的 API 售卖、账号池出租、卡密收费分发；行为人由此产生的一切后果（包括但不限于账号封禁、条款违约与法律风险）由其自行承担，与作者和贡献者无任何关系。
-2. **批量注册与转售接口配额违反目标平台服务条款。** CodeBuddy / 腾讯系服务条款禁止批量注册账号及商业转售接口。上游仓库已删除、停止公开维护——我们无法断定具体原因，但此类滥用行为正在毁掉所有正常使用者的环境，请勿再消耗社区的善意。
-3. **请勿购买任何「收费版」「卡密版」「公益中转版」。** 本项目永远免费开源。任何加壳、加密、捆绑收费的「版本」都是他人篡改的产物，与本项目无关；且此类分发无法审计，存在被植入后门、回传并窃取你 CodeBuddy 凭证的风险（`auths/` 中保存的是明文 accessToken / refreshToken）。**你付钱买到的不是本项目，而是把自己账号交给陌生人的机会。**
+2. **批量注册与转售接口配额违反目标平台服务条款。** WorkBuddy / CodeBuddy / 腾讯系服务条款禁止批量注册账号及商业转售接口。上游仓库已删除、停止公开维护——我们无法断定具体原因，但此类滥用行为正在毁掉所有正常使用者的环境，请勿再消耗社区的善意。
+3. **请勿购买任何「收费版」「卡密版」「公益中转版」。** 本项目永远免费开源。任何加壳、加密、捆绑收费的「版本」都是他人篡改的产物，与本项目无关；且此类分发无法审计，存在被植入后门、回传并窃取你 WorkBuddy / CodeBuddy 凭证的风险（`auths/` 中保存的是明文 accessToken / refreshToken）。**你付钱买到的不是本项目，而是把自己账号交给陌生人的机会。**
 4. **关于开源协议的诚实说明。** 本项目基于 MIT 协议开源，协议允许自由使用与修改源码——这是开源的本意，我们不会收回；但 MIT 赋予的是代码层面的自由，**不赋予**以本项目名义宣传、售卖、捆绑分发，或要求作者提供支持与背书的权利。作者不为任何第三方分发版本提供支持、更新承诺或安全保证。
 5. **作者保留止损的权利。** 若滥用行为持续，作者可能随时停止维护、关闭或删除仓库，且不另行通知。上游的今天可能就是本项目的明天，望自重。
 
@@ -49,13 +49,13 @@
 
 ## 项目简介
 
-WorkBuddy2API 是一个自托管的 **OpenAI 兼容反向代理网关**，将腾讯 CodeBuddy（`copilot.tencent.com`）账号包装为统一的 `/v1/chat/completions` 服务。
+**WorkBuddy 统一管理器**（仓库与包名 WorkBuddy，前身 WorkBuddy2API）是一个自托管的 **OpenAI 兼容反向代理网关 + 多账号管理工具**，将腾讯 WorkBuddy / CodeBuddy（国内 `copilot.tencent.com` / `workbuddy.cn`、国际 `workbuddy.ai`）账号包装为统一的 `/v1/chat/completions` 服务，并提供签到、成长任务、积分采集等日常运营能力。
 
 - 官方不提供 OpenAI 形态的开放 API，本项目通过 **OAuth 设备授权**（面板「账号管理」页扫码，浏览器完成登录）获取账号凭证，在网关侧做 token 自动刷新、账号池调度与流量治理；
 - 面向 **个人多账号** 场景：多账号共享、单号故障自动换号、冷却 / 熔断防止雪崩、会话粘性保证多轮上下文不跳号；
 - 对客户端只暴露 OpenAI 兼容接口，现有 SDK / 前端 / 工具 **零改造接入**。
 
-> ⚠️ 合规须知：本项目是**非官方**网关，使用 CodeBuddy 账号作为上游，**仅限本人授权账号、本机 / 私有环境测试**。详细边界见[安全与合规](#安全与合规)。
+> ⚠️ 合规须知：本项目是**非官方**网关，使用 WorkBuddy / CodeBuddy 账号作为上游，**仅限本人授权账号、本机 / 私有环境测试**。详细边界见[安全与合规](#安全与合规)。
 
 ## 核心能力
 
@@ -193,7 +193,7 @@ flowchart LR
 
 - **Python 3.10 及以上**（推荐 3.11 / 3.12 / 3.13，64 位）
 - Windows 10+ / macOS 12+ / Linux 均可；本项目是**纯 Python 实现**，无 Go / Docker 依赖
-- 一个或多个已注册的 CodeBuddy 账号，用于 OAuth 登录
+- 一个或多个已注册的 WorkBuddy / CodeBuddy 账号，用于 OAuth 登录
 
 **第三方依赖只有一个，而且是可选的**：网关、面板、任务、签到全部只用标准库（`http.server` / `urllib` / `json` …），`python scripts/main.py` 起来就能用。
 
@@ -236,7 +236,7 @@ python scripts/main.py
 
 打开统一面板 `http://127.0.0.1:7863/panel/` → 左侧「**账号管理**」→ 点「**扫码登录（国内版 / 国际版）**」，或走「设备授权登录」：
 
-1. 浏览器自动打开 CodeBuddy 设备授权页；完成登录（邮箱 / 手机号 / QQ / 微信，任选）。
+1. 浏览器自动打开 WorkBuddy / CodeBuddy 设备授权页；完成登录（邮箱 / 手机号 / QQ / 微信，任选）。
 2. 凭证写盘到 `auths/workbuddy-<uid>.json`（临时文件 + `replace` 原子替换；**没有做权限加固**，请自行保证 `auths/` 目录不被他人读取）。
 3. 网关**热加载**新账号进池（`load_auths()`），无需重启。登录成功只做这一步，**不会**顺带签到——要签到请到面板「签到日志」页点按钮。
 
@@ -491,7 +491,7 @@ Python 版**只读一个**环境变量：
 
 ### 上游端点（本分支真正调用的）
 
-上游接口都是 CodeBuddy 官方 CLI / 插件使用的**非公开接口**，没有公开文档，路径以代码内常量为准。三个 base：`CHAT_BASE = https://copilot.tencent.com`、`BILL_BASE = https://www.codebuddy.cn`、`WEB_BASE = https://www.workbuddy.cn`；国际版账号换成 `https://www.workbuddy.ai`。
+上游接口都是 WorkBuddy / CodeBuddy 官方 CLI / 插件使用的**非公开接口**，没有公开文档，路径以代码内常量为准。三个 base：`CHAT_BASE = https://copilot.tencent.com`、`BILL_BASE = https://www.codebuddy.cn`、`WEB_BASE = https://www.workbuddy.cn`；国际版账号换成 `https://www.workbuddy.ai`。
 
 | 路径 | 方法 | 用途 | 出处 |
 |---|---|---|---|
@@ -596,7 +596,7 @@ WorkBuddy_统一管理器/
 | 路径 | 内容 |
 |---|---|
 | `config.json` | **真正生效**的网关配置（`listen` / `api_key` / `auth_dir` / `state_file` / `upstream` / `pool` / `cooldown` / `models` / `usage` / `schedule`）；面板「设置」页只读预览，`POST /panel/api/config` 可改写并落盘，但 `api_key` 这类模块级取值要重启才生效 |
-| `configs/config.py` | 老式账号配置（`ACCOUNTS`），**仓库里默认留空**；`GATEWAY` / `CONSOLE` / `COLLECTOR` / `AUTOTASKS` 是历史遗留常量、**没有任何代码读取**（端口写在各模块常量里）。网关不读它，只有积分采集器 `core/wb_credits_fetcher.py` 会读 `ACCOUNTS` |
+| `configs/config.py` | 采集器账号配置（`ACCOUNTS`），**本地私有（.gitignore 忽略，不随仓库分发）**；克隆后从 `configs/config.example.py` 复制改名再填；`GATEWAY` / `CONSOLE` / `COLLECTOR` / `AUTOTASKS` 是历史遗留常量、**没有任何代码读取**（端口写在各模块常量里）。网关不读它，只有积分采集器 `core/wb_credits_fetcher.py` 会读 `ACCOUNTS` |
 | `configs/config.example.json` | 配置模板 |
 | `auths/workbuddy-<uid>.json` | OAuth 凭据（明文 `accessToken` / `refreshToken`；写盘方式是 tmp 文件 + replace） |
 | `data/state.json` | 账号池状态：`current_account_id` / `sticky_sessions` / 每账号计数与冷却 |
@@ -629,13 +629,13 @@ WorkBuddy_统一管理器/
 
 - **纯 Python 源码分发**：本仓库只发源码，无预编译二进制 / 无 Docker 镜像；除采集与浏览器自检用的 `playwright` 外没有重型依赖
 - 所有工具都是根目录下的 Python 脚本：`main.py` / `core/wb_gateway.py` / `core/wb_webui.py` / `core/wb_tasks.py` / `core/wb_auth.py` / `core/wb_checkin.py` / `core/wb_live_credits.py` / `core/wb_credits_fetcher.py` / `core/wb_usage.py` / `core/wb_models.py` / `core/wb_snapshot.py` / `core/wb_ops.py` / `selfcheck.py` / `browser_check.py`（面板「账号管理」页的扫码登录走浏览器设备授权）
-- 上游 CodeBuddy 属腾讯系商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
+- 上游 WorkBuddy / CodeBuddy 属腾讯系商业产品，本项目是其**非官方 OpenAI 兼容网关**；使用其账号做 API 网关涉及目标平台服务条款与账号风险，作者不对账号封禁、条款违约或使用结果负责
 
 ### 4. 授权使用边界
 
 - 仅限**本人授权账号**、本机 / 私有环境测试
 - 不得共享、转售、违规分发，或用于违反目标平台条款的用途；**严禁批量注册账号做 API 业务、二次加壳或捆绑卡密售卖**——详见顶部[使用声明（必读）](#使用声明必读)
-- 遵守 CodeBuddy 平台服务条款与所在地法律
+- 遵守 WorkBuddy / CodeBuddy 平台服务条款与所在地法律
 - 妥善保管 `auths/`（明文凭证）与网关端口
 
 
@@ -726,6 +726,17 @@ UA 在本分支里是**代码常量**（`wb_tasks.UA_CLI` / `UA_DESKTOP`、`wb_a
 
 ## 版本记录
 
+### 2026-10-21：介绍校正 + 采集器配置规范
+
+排查后台日志发现一处回归，顺带校正 README 与实际产品不符的品牌描述：
+
+| 变化 | 说明 |
+|---|---|
+| 采集器配置回归修复 | 89c83e0「配置示例化」把本地 `configs/config.py` 的 `ACCOUNTS` 一并注释空了，10-20 起积分采集器报「ACCOUNTS 是空的」无法运行 |
+| 配置文件规范 | 模板独立为 `configs/config.example.py`（入库）；`configs/config.py` 为本地私有账号清单，加入 `.gitignore`（与采集器文档自述的「不上传」一致） |
+| 品牌与介绍校正 | 大标题改回面板实际名称「WorkBuddy 统一管理器」；「腾讯 CodeBuddy」统一为「WorkBuddy / CodeBuddy」双品牌（上游实际覆盖 copilot.tencent.com / workbuddy.cn / codebuddy.cn / workbuddy.ai） |
+| 数字核实 | 「11 视图」（index.html 恰 11 个 data-view）与「成长任务 16/17」（wb_tasks.py TASKS 17 条 = 16 自动 + 1 手动）均与代码一致，保留 |
+
 ### 2026-10-20：目录重构（core / scripts / configs / docs）
 
 十几个 `.py` 以前全平铺在仓库根目录，找文件只能靠前缀猜。这一版只动「文件放在哪」，**不动任何运行时行为**：
@@ -753,7 +764,7 @@ UA 在本分支里是**代码常量**（`wb_tasks.UA_CLI` / `UA_DESKTOP`、`wb_a
 | 账号池全不可用时返回 503，却被标成 `invalid_request_error`，客户端以为是自己请求错了、直接放弃重试 | `_send_error` 默认 `error_type="invalid_request_error"`，5xx 也照旧 | 缺省时按状态码推断：≥500 → `api_error`、401/403 → `authentication_error`、404 → `not_found_error`（`core/wb_gateway.py:1463`） |
 | 请求了不存在的模型名，名字被原样转给上游，白挨一个 400 还连累账号 | `wb_models._merged()` 对任何未知 id 凭空造条目，`spec()` 永不返回 `None`，`resolve_requested()` 的「未知 → 兜底模型」分支成了死代码 | `_merged()` 只认内置 / 已发现 / 已覆盖的 id：`core/wb_models.py:447-452`；未知模型名现在换成 `deepseek-v4-flash` 并在日志里写明替换原因 |
 | 自检只覆盖 5 个模块，新加的文件语法错了也发现不了 | `selfcheck.MODULES` 是手写清单 | 改成 `glob("wb_*.py")` 全量收集，18 个模块 + `static/` JS 一起查（`scripts/selfcheck.py:54-60`） |
-| 克隆下来直接跑，采集器会拿示例账号去扫码登录 | `configs/config.py` 里带一条假账号（`工作号 / 139****9999`） | `ACCOUNTS` 默认留空并全部注释掉；采集器遇到空账号时给出可操作提示而非一句「没有定义 ACCOUNTS 列表」（`core/wb_credits_fetcher.py` 的 `load_config()`） |
+| 克隆下来直接跑，采集器会拿示例账号去扫码登录 | 示例移入独立模板 `configs/config.example.py`（全部注释掉，克隆者不会拿假账号扫码）；`configs/config.py` 本地私有并加入 `.gitignore`，含真实账号也不入库 |
 | 仓库目录里双击 `一键启动.bat` 直接报 `[ERROR] App folder not found` | 启动器只会找 `%~dp0WorkBuddy_*` 子目录，而本仓库根目录就是应用目录 | 先认当前目录的 `scripts\main.py`，找不到再退化去找子目录；新增 `.gitattributes` 强制 `.bat` 保持 CRLF |
 | 7863 端口被上一次的网关占着时，只打印一句「网关启动失败」 | 没区分「端口占用」和「真的没起来」 | `scripts/main.py` 新增 `port_in_use()`，占用时直接给出 `netstat -ano` + `findstr :7863` 查 PID、`taskkill /PID <PID> /F` 的下一步 |
 
@@ -774,7 +785,7 @@ UA 在本分支里是**代码常量**（`wb_tasks.UA_CLI` / `UA_DESKTOP`、`wb_a
 
 ## 免责声明
 
-本项目仅供学习和研究使用。使用者需遵守 CodeBuddy 服务条款，自行承担使用风险（包括账号封禁、条款违约等）。作者不对任何因使用本项目产生的直接或间接损失负责。
+本项目仅供学习和研究使用。使用者需遵守 WorkBuddy / CodeBuddy 服务条款，自行承担使用风险（包括账号封禁、条款违约等）。作者不对任何因使用本项目产生的直接或间接损失负责。
 
 ## License
 
@@ -782,4 +793,4 @@ UA 在本分支里是**代码常量**（`wb_tasks.UA_CLI` / `UA_DESKTOP`、`wb_a
 
 - 允许任意使用、复制、修改、合并、发布、分发、再授权及销售
 - 再分发（源码或二进制形式）时，请保留原仓库的 MIT 版权声明与许可声明（如在 NOTICE 或 README 中注明原始出处 `https://github.com/Sliverkiss/workbuddy2api`）
-- 本项目不授予任何上游（CodeBuddy / 腾讯）接口或服务的权利；使用者仍需自行遵守上游服务条款
+- 本项目不授予任何上游（WorkBuddy / CodeBuddy / 腾讯）接口或服务的权利；使用者仍需自行遵守上游服务条款

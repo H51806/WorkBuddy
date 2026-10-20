@@ -39,6 +39,10 @@ wb_data/request-logs/
 # 只提交 config.example.json 作为模板；config.json 由用户本地从 example 复制生成
 config.json
 
+# 采集器账号清单：本地私有，绝不入库（模板见 configs/config.example.py）
+configs/config.py
+
+
 # ---------- 5. 二进制产物（体积大且非源码）----------
 *.exe
 *.dll

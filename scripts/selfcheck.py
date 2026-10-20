@@ -54,7 +54,7 @@ except Exception:
 MODULE_PATHS = (
     {p.name: p for p in CORE_DIR.glob("wb_*.py")}
 )
-for _rel in ("scripts/main.py", "configs/config.py", "scripts/browser_check.py",
+for _rel in ("scripts/main.py", "configs/config.example.py", "scripts/browser_check.py",
              "scripts/selfcheck.py", "scripts/test_webui.py"):
     MODULE_PATHS[Path(_rel).name] = BASE_DIR / _rel
 MODULES = sorted(MODULE_PATHS)
