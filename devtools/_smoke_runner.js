@@ -7,7 +7,7 @@
  * 段号：1=11 视图+外壳+导航  2=交互A(pool/models/tokens/credits/tasks)
  *       3=签到+实时日志  4=账号+设置  5=鲁棒性(500/401/hash)
  * 用 headless Chrome 1240 宽 fullPage 截图，读页面顶部横幅的 PASS/FAIL。
- * 详见 ../测试报告.md 第 7 节。
+ * 详见 ../docs/测试报告.md 第 7 节。
  * ============================================================ */
 (function () {
   'use strict';

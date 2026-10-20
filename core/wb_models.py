@@ -28,7 +28,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 # ===== 路径与常量 =====
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent  # 仓库根（本文件在 core/ 下）
 
 
 def _default_data_dir() -> Path:

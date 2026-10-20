@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 # ===== 基础配置 =====
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent  # 仓库根（本文件在 core/ 下）
 DATA_DIR = BASE_DIR / "wb_data"
 AUTH_DIR = BASE_DIR / "auths"
 TASKS_LOG = DATA_DIR / "tasks_log.jsonl"

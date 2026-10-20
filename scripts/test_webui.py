@@ -3,7 +3,7 @@
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "core"))  # wb_webui 在 core/ 下
 
 from wb_webui import WebUIHandler
 from http.server import ThreadingHTTPServer

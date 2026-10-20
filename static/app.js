@@ -1,5 +1,5 @@
 /* WorkBuddy 统一管理器 — 统一面板前端
- * 无外部依赖、无构建：由 wb_gateway.py 的 /panel/static/app.js 直接送出。
+ * 无外部依赖、无构建：由 core/wb_gateway.py 的 /panel/static/app.js 直接送出。
  * 数据全走 /panel/api/*；鉴权用 localStorage 里的 API Key（也可 URL #key= 传入）。
  */
 (function () {

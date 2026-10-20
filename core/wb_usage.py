@@ -37,7 +37,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # ===== 路径与常量 =====
 
-BASE_DIR = Path(__file__).resolve().parent
+BASE_DIR = Path(__file__).resolve().parent.parent  # 仓库根（本文件在 core/ 下）
 DATA_DIR = Path(os.environ.get("WORKBUDDY_DATA_DIR") or (BASE_DIR / "data"))
 USAGE_FILE = DATA_DIR / "usage.json"
 

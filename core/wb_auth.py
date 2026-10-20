@@ -25,7 +25,7 @@ import urllib.error
 from pathlib import Path
 from typing import Dict, Any, Tuple
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent  # 仓库根（本文件在 core/ 下）
 AUTH_DIR = BASE_DIR / "auths"
 AUTH_SESSION_FILE = BASE_DIR / "data" / "login_sessions.json"
 

@@ -11,12 +11,12 @@ WorkBuddy 多账号积分自动采集器
 使用方法：
   1. 安装依赖：pip install playwright
   2. 初始化浏览器：playwright install chromium
-  3. 编辑 config.py 填入账号信息
-  4. 运行：python wb_credits_fetcher.py
+  3. 编辑 configs/config.py 填入账号信息
+  4. 运行：python core/wb_credits_fetcher.py
 
 安全说明：
   - 所有数据仅存储在你本地电脑
-  - 凭证存在同目录的 config.py 中（建议加入 .gitignore）
+  - 凭证存在 configs/config.py 中（已被 .gitignore 忽略，不会上传）
   - 浏览器在可见模式运行，你可全程观察操作过程
 
 作者：CodeBuddy Agent
@@ -45,9 +45,11 @@ from pathlib import Path
 FETCHER_VERSION = "3.5"
 
 # ===== 配置 =====
-DATA_DIR = Path(__file__).parent / "wb_data"
+#: 仓库根：本文件在 core/ 下，数据目录与账号配置都在上一级。
+ROOT_DIR = Path(__file__).parent.parent
+DATA_DIR = ROOT_DIR / "wb_data"
 DATA_FILE = DATA_DIR / "credits_history.json"
-CONFIG_FILE = Path(__file__).parent / "config.py"
+CONFIG_FILE = ROOT_DIR / "configs" / "config.py"
 
 # 日志配置
 logging.basicConfig(
@@ -91,8 +93,8 @@ def attach_file_log():
 
 def load_config():
     """
-    从 config.py 加载账号配置
-    config.py 格式示例：
+    从 configs/config.py 加载账号配置
+    configs/config.py 格式示例：
 
     ACCOUNTS = [
         {
@@ -130,28 +132,28 @@ def load_config():
         exec(compile(src, str(CONFIG_FILE), "exec"), namespace)
         accounts = namespace.get("ACCOUNTS", [])
         if not accounts:
-            log.error("config.py 的 ACCOUNTS 是空的 —— 没有可采集的账号")
+            log.error("configs/config.py 的 ACCOUNTS 是空的 —— 没有可采集的账号")
             try:
                 # Windows 控制台可能是 GBK，直接 print 中文会乱码
                 sys.stdout.reconfigure(errors="replace")
             except Exception:
                 pass
-            print("\n[提示] 积分采集依赖 config.py 里的 ACCOUNTS 清单，当前为空。")
+            print("\n[提示] 积分采集依赖 configs/config.py 里的 ACCOUNTS 清单，当前为空。")
             print("       1) 如果你只想管理账号/聊天：不用跑采集器，直接在")
             print("          http://127.0.0.1:7863/panel/ 的「账号管理」页扫码登录即可；")
-            print("       2) 如果你要采集积分：打开 config.py，把 ACCOUNTS 里注释掉的")
+            print("       2) 如果你要采集积分：打开 configs/config.py，把 ACCOUNTS 里注释掉的")
             print("          条目取消注释并填入你的账号，然后重新运行。")
             sys.exit(1)
         return accounts
     except SyntaxError as e:
         # v3.6.1：直接指出第几行错了，并把出错那几行打出来
         ln = e.lineno or 1
-        log.error(f"config.py 第 {ln} 行有语法错误：{e.msg}")
+        log.error(f"configs/config.py 第 {ln} 行有语法错误：{e.msg}")
         lines = src.split("\n")
         for i in range(max(0, ln - 3), min(len(lines), ln + 2)):
             log.error(("  >> " if i == ln - 1 else "     ") + f"{i + 1:>4} | {lines[i]}")
-        print(f"\n[错误] config.py 第 {ln} 行有语法错误：{e.msg}")
-        print("       请用记事本打开 config.py，检查上面标 >> 的那一行。")
+        print(f"\n[错误] configs/config.py 第 {ln} 行有语法错误：{e.msg}")
+        print("       请用记事本打开 configs/config.py，检查上面标 >> 的那一行。")
         print("       常见原因：多打了空格 / 少了一个逗号 / 引号没配对。")
         sys.exit(1)
     except Exception as e:
@@ -962,13 +964,13 @@ renderAll();
 
     html = '\n'.join(html_parts)
 
-    report_path = Path(__file__).parent / "wb_data" / ("report_" + datetime.now().strftime('%Y%m%d_%H%M%S') + ".html")
+    report_path = DATA_DIR / ("report_" + datetime.now().strftime('%Y%m%d_%H%M%S') + ".html")
     ensure_data_dir()
     report_path.write_text(html, encoding="utf-8")
     log.info(f"  -> 已生成 HTML 报告: {report_path.name}")
 
     # 同时复制一份固定名称的最新报告
-    latest_report = Path(__file__).parent / "wb_data" / "latest_report.html"
+    latest_report = DATA_DIR / "latest_report.html"
     latest_report.write_text(html, encoding="utf-8")
 
     return report_path
@@ -1062,7 +1064,7 @@ def run_all(accounts, auto_mode=False, headless=False):
         log.info(f"  {r['name']}: Credits={creds}, Energy={energy} {status}")
     log.info("-" * 50)
     log.info(f"数据已保存至: {DATA_FILE}")
-    log.info(f"HTML 报告: {Path(__file__).parent / 'wb_data' / 'latest_report.html'} （双击打开即可查看）")
+    log.info(f"HTML 报告: {DATA_DIR / 'latest_report.html'} （双击打开即可查看）")
     log.info(f"截图保存在: {DATA_DIR}/")
 
     return results, history

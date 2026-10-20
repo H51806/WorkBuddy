@@ -23,7 +23,7 @@
 #       请把 WORKBUDDY_API_KEY 环境变量设成 config.json 里的 api_key；
 #       该变量解析为空时请求会以 MISSING_CREDENTIAL 失败。
 #       若 config.json 的 api_key 是空串，网关根本不校验 Authorization
-#       （wb_gateway.py:1356-1365），此时随便填一个非空占位值即可。
+#       （core/wb_gateway.py 里的 _send_error 调用点），此时随便填一个非空占位值即可。
 # ============================================================================
       workbuddy-manager:
         displayName: WorkBuddy 统一管理器
@@ -114,7 +114,7 @@
 #     model: deepseek-v4-flash
 # ----------------------------------------------------------------------------
 
-# 验证（网关需先 python main.py 起来）：
+# 验证（网关需先 python scripts/main.py 起来）：
 #   curl -s http://127.0.0.1:7863/v1/models -H "Authorization: Bearer <api_key>"
 #   curl -s http://127.0.0.1:7863/v1/chat/completions -H "Authorization: Bearer <api_key>" \
 #        -H "Content-Type: application/json" \

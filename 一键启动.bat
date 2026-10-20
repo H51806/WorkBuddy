@@ -7,13 +7,17 @@ rem  WorkBuddy Manager -- the ONLY launcher you need.
 rem  (ASCII-only on purpose: cmd.exe mis-parses non-ASCII .bat)
 rem ============================================================
 
-rem -- locate main.py: this folder first (repo layout), then a WorkBuddy_* child --
+rem -- locate scripts\main.py: this folder first (repo layout), then a WorkBuddy_* child --
+rem    repo layout: <root>\scripts\main.py + <root>\core\wb_gateway.py
+rem    flat layout: main.py + wb_gateway.py next to this .bat (older clones)
 set "APPDIR="
-if exist "%~dp0main.py" set "APPDIR=%~dp0"
-if not defined APPDIR for /d %%d in ("%~dp0WorkBuddy_*") do if exist "%%d\main.py" set "APPDIR=%%d"
-if not defined APPDIR (echo [ERROR] main.py not found: neither in this folder nor in a WorkBuddy_* subfolder. & pause & exit /b 1)
+set "MAINPY="
+if exist "%~dp0scripts\main.py" set "APPDIR=%~dp0" & set "MAINPY=%~dp0scripts\main.py"
+if not defined APPDIR if exist "%~dp0main.py" set "APPDIR=%~dp0" & set "MAINPY=%~dp0main.py"
+if not defined APPDIR for /d %%d in ("%~dp0WorkBuddy_*") do if exist "%%d\scripts\main.py" set "APPDIR=%%d" & set "MAINPY=%%d\scripts\main.py"
+if not defined APPDIR (echo [ERROR] scripts\main.py not found: neither in this folder nor in a WorkBuddy_* subfolder. & pause & exit /b 1)
 cd /d "%APPDIR%"
-if not exist "main.py" (echo [ERROR] main.py not found in "%APPDIR%". & pause & exit /b 1)
+if not exist "%MAINPY%" (echo [ERROR] launcher missing: "%MAINPY%". & pause & exit /b 1)
 
 rem -- find a real CPython 3.10+ (avoid the Microsoft Store stub) --
 set "PYTHON_CMD="
@@ -36,7 +40,7 @@ echo  Press Ctrl+C in this window to stop.
 echo ============================================
 echo.
 
-"%PYTHON_CMD%" -u main.py
+"%PYTHON_CMD%" -u "%MAINPY%"
 set "EXITCODE=%ERRORLEVEL%"
 echo.
 echo WorkBuddy Manager stopped with code %EXITCODE%.

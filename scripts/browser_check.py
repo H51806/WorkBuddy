@@ -25,8 +25,9 @@ http://127.0.0.1:7863/panel/。所以本脚本默认打 8789/legacy（老界面�
 import sys
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
-sys.path.insert(0, str(BASE_DIR))
+#: 仓库根：本文件在 scripts/ 下，核心模块在 core/。
+BASE_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(BASE_DIR / "core"))
 
 try:
     from wb_playwright_transport_patch import apply_patch

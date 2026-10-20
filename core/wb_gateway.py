@@ -33,7 +33,35 @@ from typing import Optional, Dict, List, Any
 from dataclasses import dataclass, field, asdict
 
 # ===== 配置 =====
-BASE_DIR = Path(__file__).parent
+# Windows 控制台默认是 GBK（代码页 936），编不出启动横幅里的 '•' 这类字符 ——
+# 不兜住的话 print_banner 会在启动第一步抛 UnicodeEncodeError，网关直接起不来。
+try:
+    sys.stdout.reconfigure(errors="replace")
+except Exception:
+    pass
+
+BASE_DIR = Path(__file__).parent.parent  # 仓库根（本文件在 core/ 下）
+
+#: config.py 现在在 configs/ 下，按这个路径加载（不能只靠 sys.path，免得用户环境里
+#: 有个同名的 config 模块被误导入 —— 那是很多「配置不生效」类问题的根源）。
+CONFIG_PY = Path(__file__).parent.parent / "configs" / "config.py"
+
+
+def _load_user_config():
+    """加载 configs/config.py 作为模块返回；不存在或出错时返回 None（历史行为：静默兜底）。"""
+    import importlib.util
+    try:
+        if not CONFIG_PY.exists():
+            return None
+        spec = importlib.util.spec_from_file_location("wb_user_config", CONFIG_PY)
+        if spec is None or spec.loader is None:
+            return None
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+    except Exception:
+        return None
+
 DATA_DIR = BASE_DIR / "data"
 CONFIG_FILE = BASE_DIR / "config.json"
 STATE_FILE = DATA_DIR / "state.json"
@@ -1035,7 +1063,7 @@ def _enrich_pool_credits() -> None:
     # config.ACCOUNTS 里的 name 集合（兜底匹配）
     config_names = set()
     try:
-        import config as _cfg
+        _cfg = _load_user_config()
         for a in getattr(_cfg, "ACCOUNTS", []) or []:
             config_names.add(str(a.get("name") or ""))
     except Exception:

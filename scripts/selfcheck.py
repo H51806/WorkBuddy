@@ -33,7 +33,10 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
-BASE_DIR = Path(__file__).resolve().parent
+#: 仓库根：本文件在 scripts/ 下，核心模块在 core/，静态资源在仓库根的 static/。
+BASE_DIR = Path(__file__).resolve().parent.parent
+CORE_DIR = BASE_DIR / "core"
+STATIC_DIR = BASE_DIR / "static"
 PY = sys.executable
 
 # Windows 控制台默认是 GBK，代码页 936 编不出 '✓' 这类字符 —— 不打这一行，
@@ -47,10 +50,14 @@ except Exception:
 # 语法检查覆盖全部交付模块，而不是手写几个名字 —— 以前只列了 5 个，另外 13 个
 # （含 wb_models.py / wb_checkin.py / wb_credits_fetcher.py 等）改坏了自检也看不出来。
 # 用 glob 动态取，以后新增的 wb_*.py 自动纳入；下划线前缀的临时脚本不算。
-MODULES = sorted(
-    [p.name for p in BASE_DIR.glob("wb_*.py")]
-    + ["main.py", "config.py", "browser_check.py", "selfcheck.py", "test_webui.py"]
+# 路径表 = 模块名 -> 相对仓库根的路径（模块分散在 core/ scripts/ configs/ 三个目录）。
+MODULE_PATHS = (
+    {p.name: p for p in CORE_DIR.glob("wb_*.py")}
 )
+for _rel in ("scripts/main.py", "configs/config.py", "scripts/browser_check.py",
+             "scripts/selfcheck.py", "scripts/test_webui.py"):
+    MODULE_PATHS[Path(_rel).name] = BASE_DIR / _rel
+MODULES = sorted(MODULE_PATHS)
 
 PASS, FAIL, WARN = "  [OK]  ", "  [!!]  ", "  [??]  "
 
@@ -67,7 +74,7 @@ def header(title):
 def check_py_compile():
     header("1/4  Python 语法检查 (py_compile)")
     for name in MODULES:
-        path = BASE_DIR / name
+        path = MODULE_PATHS[name]
         if not path.exists():
             print(WARN + f"{name} 不存在，跳过")
             warnings.append(f"{name} 不存在")
@@ -87,13 +94,13 @@ def extract_scripts(html):
 
 
 def get_webui_html():
-    sys.path.insert(0, str(BASE_DIR))
+    sys.path.insert(0, str(CORE_DIR))
     from wb_webui import WebUIHandler
     return WebUIHandler.get_index_html(None)
 
 
 def get_panel_html():
-    sys.path.insert(0, str(BASE_DIR))
+    sys.path.insert(0, str(CORE_DIR))
     import wb_gateway
     return wb_gateway.PANEL_HTML
 
@@ -143,8 +150,8 @@ def check_pages():
     # 统一面板的界面已经搬进 static/*.js（不再内联在 HTML 里），必须单独校验，
     # 否则 app.js 里一个笔误上面这段照样全 PASS，而浏览器打开是一片空白。
     static_js = [
-        ("统一面板 app.js", BASE_DIR / "static" / "app.js"),
-        ("统一面板 sw.js", BASE_DIR / "static" / "sw.js"),
+        ("统一面板 app.js", STATIC_DIR / "app.js"),
+        ("统一面板 sw.js", STATIC_DIR / "sw.js"),
     ]
     for label, path in static_js:
         if not path.exists():
@@ -173,7 +180,7 @@ def check_leftovers():
         ("wb_webui.py", r'return\s+r"""', "WebUI 主页 HTML 是原始字符串"),
     ]
     for filename, pattern, desc in raw_checks:
-        path = BASE_DIR / filename
+        path = CORE_DIR / filename
         if not path.exists():
             print(WARN + f"{filename} 不存在，跳过")
             continue
@@ -199,7 +206,7 @@ def check_leftovers():
             print(PASS + f"{label}: 密钥占位符已替换")
 
     # 统一面板的静态资源由网关直接对外托管（/panel/static/<file>），逐项确认
-    static_dir = BASE_DIR / "static"
+    static_dir = STATIC_DIR
     required = ["index.html", "app.css", "app.js", "manifest.webmanifest", "sw.js",
                 "icon-192.png", "icon-512.png", "icon-maskable-512.png"]
     missing = [n for n in required if not (static_dir / n).is_file()]
@@ -236,7 +243,7 @@ def check_online():
     header("4/4  在线冒烟（本地接口）")
     api_key = ""
     try:
-        sys.path.insert(0, str(BASE_DIR))
+        sys.path.insert(0, str(CORE_DIR))
         import wb_webui
         api_key = getattr(wb_webui, "API_KEY", "")
     except Exception as e:

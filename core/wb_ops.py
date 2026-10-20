@@ -20,7 +20,8 @@ import threading
 import urllib.request
 from pathlib import Path
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent  # 仓库根（本文件在 core/ 下）
+CORE_DIR = Path(__file__).parent        # 核心模块所在目录（诊断时按它判断文件是否齐全）
 DATA_DIR = BASE_DIR / "wb_data"
 GATEWAY_PORT = 7863
 GATEWAY_URL = "http://127.0.0.1:%d" % GATEWAY_PORT
@@ -71,7 +72,7 @@ def start_collect(action: str = "collect"):
         log_file = DATA_DIR / "collect_log.txt"
         log_file.parent.mkdir(exist_ok=True)
 
-        cmd = [sys.executable, str(BASE_DIR / "wb_credits_fetcher.py"), "--auto"]
+        cmd = [sys.executable, str(CORE_DIR / "wb_credits_fetcher.py"), "--auto"]
 
         try:
             collect_proc = subprocess.Popen(
@@ -193,7 +194,8 @@ def diagnose_deps() -> str:
         except Exception:
             deps.append("%s=MISSING(optional)" % mod)
     for name in ("wb_gateway.py", "wb_tasks.py", "wb_auth.py", "wb_credits_fetcher.py"):
-        deps.append("%s=%s" % (name, "OK" if (BASE_DIR / name).exists() else "MISSING"))
+        # 核心模块现在都在 core/ 下（重启后的目录结构），所以按 CORE_DIR 判断
+        deps.append("%s=%s" % (name, "OK" if (CORE_DIR / name).exists() else "MISSING"))
     auth_dir = BASE_DIR / "auths"
     n_auth = len(list(auth_dir.glob("*.json"))) if auth_dir.exists() else 0
     deps.append("auths=%s" % n_auth)

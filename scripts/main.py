@@ -27,10 +27,21 @@ from http.server import ThreadingHTTPServer
 from datetime import datetime
 
 # ===== 配置 =====
-BASE_DIR = Path(__file__).parent
+#: 仓库根：本文件在 scripts/ 下，网关在 core/ 下，数据目录在仓库根。
+BASE_DIR = Path(__file__).parent.parent
+CORE_DIR = BASE_DIR / "core"
+GATEWAY_PY = CORE_DIR / "wb_gateway.py"
 DATA_DIR = BASE_DIR / "wb_data"
 GATEWAY_PORT = 7863
 CONSOLE_PORT = 8789
+
+# Windows 控制台默认是 GBK（代码页 936），编不出启动横幅里的 '•' 这类字符 ——
+# 不兜住的话 print_banner() 会在启动第一步抛 UnicodeEncodeError 直接崩掉。
+# stdout 被重定向成管道时 reconfigure 不存在，所以用 try 包住。
+try:
+    sys.stdout.reconfigure(errors="replace")
+except Exception:
+    pass
 
 # 状态
 shutdown_event = threading.Event()
@@ -70,7 +81,7 @@ def start_gateway():
 
     try:
         gateway_proc = subprocess.Popen(
-            [sys.executable, "-u", str(BASE_DIR / "wb_gateway.py")],
+            [sys.executable, "-u", str(GATEWAY_PY)],
             cwd=str(BASE_DIR),
         )
 
@@ -90,7 +101,7 @@ def start_gateway():
         else:
             print(f"[错误] 网关启动失败（端口 {GATEWAY_PORT} 没起来），上面网关自己打的报错是线索。")
         print(f"       单独跑一次网关可以直接看到完整报错："
-              f"\"{sys.executable}\" wb_gateway.py")
+              f"\"{sys.executable}\" \"{GATEWAY_PY}\"")
         print("[错误] 网关启动失败，退出")
         return False
     except Exception as e:
@@ -104,8 +115,8 @@ def start_console(port=CONSOLE_PORT):
     print(f"[控制台] 地址: http://localhost:{port}")
     
     try:
-        # 动态导入 WebUI 模块
-        sys.path.insert(0, str(BASE_DIR))
+        # 动态导入 WebUI 模块（wb_webui.py 在 core/ 下）
+        sys.path.insert(0, str(CORE_DIR))
         from wb_webui import WebUIHandler
         
         server = ThreadingHTTPServer(("127.0.0.1", port), WebUIHandler)

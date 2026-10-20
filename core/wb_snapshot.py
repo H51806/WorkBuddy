@@ -26,7 +26,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-BASE_DIR = Path(__file__).parent
+BASE_DIR = Path(__file__).parent.parent  # 仓库根（本文件在 core/ 下）
 DATA_DIR = BASE_DIR / "data"
 WB_DATA_DIR = BASE_DIR / "wb_data"
 AUTH_DIR = BASE_DIR / "auths"

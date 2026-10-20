@@ -13,7 +13,7 @@ import os
 import urllib.error
 import urllib.request
 
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # 仓库根（本文件在 core/ 下）
 BILL_BASE = "https://www.codebuddy.cn"
 UA = "Mozilla/5.0"
 
