@@ -1263,6 +1263,7 @@ def refresh_auth_tokens(force: bool = False) -> Dict[str, Any]:
         h = {
             "Content-Type": "application/json",
             "Accept": "application/json, text/plain, */*",
+            "X-Requested-With": "XMLHttpRequest",
             "User-Agent": "CLI/2.63.2 CodeBuddy/2.63.2",
             "Origin": "https://www.codebuddy.cn",
             "Referer": "https://www.codebuddy.cn/",
@@ -1293,10 +1294,26 @@ def refresh_auth_tokens(force: bool = False) -> Dict[str, Any]:
                 continue
 
             h = headers_for(raw)
-            h["Authorization"] = "Bearer " + (auth.get("accessToken") or auth.get("access_token") or "")
-            req = Request(CHAT_BASE + "/v2/plugin/auth/token/refresh", data=None, headers=h, method="POST")
-            with urlopen(req, timeout=30) as resp:
-                body = json.loads(resp.read().decode("utf-8", "replace"))
+            # 上游刷新端点要求把 refreshToken 放在 X-Refresh-Token 请求头里。
+            # 2026-10-22 实测：JSON body / query / form / Bearer 携带全部返回
+            # 10001 "refreshToken is empty"，只有请求头这一种姿势返回 200。
+            h["X-Refresh-Token"] = rt
+            # 国际号（domain=www.workbuddy.ai）必须打到 workbuddy.ai，国内号打 copilot
+            _dom = auth.get("domain") or ""
+            _base = "https://www.workbuddy.ai" if "workbuddy.ai" in _dom else CHAT_BASE
+            h["Origin"] = _base
+            h["Referer"] = _base.rstrip("/") + "/"
+            req = Request(_base + "/v2/plugin/auth/token/refresh", data=b"{}", headers=h, method="POST")
+            try:
+                with urlopen(req, timeout=30) as resp:
+                    body = json.loads(resp.read().decode("utf-8", "replace"))
+            except HTTPError as e:
+                _eb = ""
+                try:
+                    _eb = e.read().decode("utf-8", "replace")[:200]
+                except Exception:
+                    pass
+                raise RuntimeError(f"HTTP {e.code}: {_eb or e.reason}")
             # 兼容上游 {data:{accessToken}} 或直接对象
             data = body.get("data", body) if isinstance(body, dict) else {}
             new_at = data.get("accessToken") or data.get("access_token") or ""
