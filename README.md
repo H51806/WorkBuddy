@@ -390,7 +390,7 @@ Python 版**只读一个**环境变量：
 | 其它上游失败 | `fail_count += 1`；达到 `pool.breaker_threshold`（默认 3）即熔断 `breaker_until = now + pool.breaker_cooldown`（默认 `30m`） | 是 | 到期自动恢复，或任意一次成功清零 |
 | **客户端请求本身错**（HTTP 400 且不是反探测，例如模型名非法 / `messages` 为空 / 参数不合法） | 直接返回带上游真实原因的 400，**不换号、不重试** | **否** | — |
 | **反探测拦截**（HTTP 400 且 `code=11128` / `request illegal` / 请求被拦截 / `Illegal API invocation from an unapproved channel`） | 原地指数退避重发（最多 2 次）；仍被拦则该账号冷却 6s 并换号 | **否** | 6s 后重新参与选号 |
-| **反探测成串来袭**（30s 内累计 8 次拦截） | 打开**进程级熔断 20s**：期间所有 `/v1/chat/completions` 直接回 `429 + Retry-After`，**一个上游请求都不发** | **否** | 20s 后自动恢复；客户端按 `Retry-After` 退避即可 |
+| **反探测成串来袭**（30s 内累计 8 次拦截） | 打开**进程级熔断**：期间所有 `/v1/chat/completions` 直接回 `429 + Retry-After`，**一个上游请求都不发**。首档 20s，连续几轮解不开则每轮翻倍（20→40→80→160，封顶 180s） | **否** | 熔断到点自动恢复；**只要有任意一次成功请求，退避阶梯立刻回到第一档**；客户端按 `Retry-After` 退避即可 |
 
 这条分档是必须的：早期版本对所有上游 `HTTPError` 无条件记失败，于是**客户端连发 3 个坏请求就能把池里每个账号都熔断 30 分钟**，全站 503。判定依据是「这个错误换个账号重发还有意义吗」——客户端请求错在哪个号上都会错，反探测则是上游对单个账号的临时拦截。
 
@@ -487,7 +487,8 @@ Python 版**只读一个**环境变量：
 - 上游返回 HTTP 错误码时，响应体带上游真实原因：`{"error":{"message":"Upstream error <code>: <上游 displayMsg.zh / msg / extError.message>","type":"api_error","code":<code>}}`——取不到原因时 message 里写 `no detail provided`，不再只回一个裸状态码（`_upstream_message()`，`core/wb_gateway.py:654`）。
 - `400` 且被判定为**客户端请求错**时返回 `{"type":"invalid_request_error"}`，且不计入账号失败；被判定为**反探测**时先原地重发再换号（见上一节表格）。
 - 错误响应的 `type` 现在按状态码推断（`core/wb_gateway.py:1463`）：`≥500` → `api_error`、`401/403` → `authentication_error`、`404` → `not_found_error`、`429` → `rate_limit_error`、其余 → `invalid_request_error`。这意味着 `503`（账号全部不可用）不会再被客户端当成「你的请求错了」而放弃重试。
-- 反探测导致**所有账号都被拦**时返回 `429`（不是 `503`）+ `Retry-After`：这是几秒~几十秒的临时窗口，客户端应退避重试，而不是判定「服务端坏了」。
+- 反探测导致**所有账号都被拦**时返回 `429`（不是 `503`）+ `Retry-After`：这是几秒~几十秒的临时窗口，客户端应退避重试，而不是判定「服务端坏了」。`Retry-After` 与文案用同一个向上取整的秒数（`antiprobe_retry_after()`，`core/wb_gateway.py`），不会再印出「请 **0** 秒后重试」这种看起来像网关坏了的文案。
+- 反探测熔断是**阶梯式**的：首档 20s，连续第 N 轮翻 N 次倍（封顶 180s），任何一次成功请求都会把阶梯归零（`clear_antiprobe_backoff()`）。只升不降会让一天里攒下的几轮拦截把白天的单次抖动也放大成几分钟不可用。
 - 其它异常统一 500 `Request failed: …`；响应头已发出（流式已开始）时错误只写日志。
 - 每次请求（成功与失败）都会落一条用量记录；成功还会 `record_success()` 把 `fail_count` 清零。
 
@@ -765,6 +766,8 @@ UA 在本分支里是**代码常量**（`wb_tasks.UA_CLI` / `UA_DESKTOP`、`wb_a
 | 上游反探测（`code=11128`）被当成普通失败，还会先把账号熔断 30 分钟再走重发 | 反探测没有独立分支，`record_failure` 在重发之前就执行了 | 11128 单独处理：原地重发 2 次（0.8s 间隔）→ 仍被拦则换号，该账号冷却 60s，不计入熔断（`ANTIPROBE_*` 常量在 `core/wb_gateway.py:54-56`） |
 | 账号池全不可用时返回 503，却被标成 `invalid_request_error`，客户端以为是自己请求错了、直接放弃重试 | `_send_error` 默认 `error_type="invalid_request_error"`，5xx 也照旧 | 缺省时按状态码推断：≥500 → `api_error`、401/403 → `authentication_error`、404 → `not_found_error`（`core/wb_gateway.py:1463`） |
 | 上游 11128 一反探测，DSH 就整分钟用不了：每个客户端请求被放大成「2 次重发 × 2 个账号」的上游调用，客户端自己又在每 8 秒重试，打点风暴让上游更不肯放开 | 网关没有进程级节流，只有「逐请求重发 + 逐账号冷却」，失败越多打得越狠 | 加进程级反探测熔断：30s 内累计 8 次拦截 → 熔断 20s，期间回 `429 + Retry-After` 且**不打上游**；全部账号被拦时也回 `429` 而非 `503`（`ANTIPROBE_STORM_*`、`note_antiprobe()`、`antiprobe_block_left()`，`core/wb_gateway.py:1506-1530`） |
+| 429 文案印出「上游正在拦截本机请求（反探测封禁中），请 **0** 秒后重试」——用户以为网关坏了 | 文案用 `%.0f` 截断剩余秒数（0.4s → 0），`Retry-After` 头却用 `int(left)+1`，两处不一致 | 抽出 `antiprobe_retry_after()` 统一向上取整并保证 ≥1，文案与响应头共用同一个数 |
+| 熔断固定 20s：上游拦截窗口比 20s 长时，每 20s 就重打一轮，永远解不开，还越打越像探测流量 | 熔断时长是常量，没有按「连续第几轮」区分 | 退避阶梯：每轮翻倍 20→40→80→160（封顶 `ANTIPROBE_BLOCK_MAX=180`），任意一次成功请求即归零（`clear_antiprobe_backoff()`） |
 | 兜底选号时抛 `order_priority() missing 1 required positional argument: 'now'`，每次都退化成「最久未用优先」 | 调用 `wb_pool_policy.order_priority(rest)` 漏传 `now` | 补上 `time.time()`：`core/wb_gateway.py:1934` |
 | 请求了不存在的模型名，名字被原样转给上游，白挨一个 400 还连累账号 | `wb_models._merged()` 对任何未知 id 凭空造条目，`spec()` 永不返回 `None`，`resolve_requested()` 的「未知 → 兜底模型」分支成了死代码 | `_merged()` 只认内置 / 已发现 / 已覆盖的 id：`core/wb_models.py:447-452`；未知模型名现在换成 `deepseek-v4-flash` 并在日志里写明替换原因 |
 | 自检只覆盖 5 个模块，新加的文件语法错了也发现不了 | `selfcheck.MODULES` 是手写清单 | 改成 `glob("wb_*.py")` 全量收集，18 个模块 + `static/` JS 一起查（`scripts/selfcheck.py:54-60`） |

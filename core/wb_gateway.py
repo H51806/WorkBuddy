@@ -96,7 +96,11 @@ AVAIL_WAIT_MAX = 12.0
 #: 直接对客户端回 429 + Retry-After，期间一个上游请求都不发。
 ANTIPROBE_STORM_N = 8
 ANTIPROBE_STORM_WINDOW = 30.0
+#: 第一档熔断时长。连续几轮都解不开说明上游的拦截窗口比 20 秒长，
+#: 每一轮翻倍（20→40→80→160，封顶 ANTIPROBE_BLOCK_MAX），
+#: 只要出现一次成功请求就回到第一档——按「上游已经放开」处理。
 ANTIPROBE_STORM_BLOCK = 20.0
+ANTIPROBE_BLOCK_MAX = 180.0
 
 # 上游真实可用的模型 id（逐个实测确认，其它名字上游一律回
 # {"code":11102,"msg":"model [x] service info not found"}）。
@@ -1508,27 +1512,56 @@ def account_auth_summary() -> List[Dict[str, Any]]:
 # 越打越不放开。这里做进程级节流——短窗口内拦截次数过多就直接对客户端 429。
 _ANTIPROBE_EVENTS: List[float] = []
 _ANTIPROBE_BLOCK_UNTIL = 0.0
+#: 退避阶梯：连续第 N 轮熔断翻 N 次倍，出现一次成功请求就归零。
+_ANTIPROBE_BLOCK_LEVEL = 0
 
 
 def note_antiprobe() -> None:
     """记录一次上游反探测拦截；短窗口内累计够多就打开全局熔断。"""
-    global _ANTIPROBE_BLOCK_UNTIL
+    global _ANTIPROBE_BLOCK_UNTIL, _ANTIPROBE_BLOCK_LEVEL
     now = time.time()
     _ANTIPROBE_EVENTS.append(now)
     cutoff = now - ANTIPROBE_STORM_WINDOW
     while _ANTIPROBE_EVENTS and _ANTIPROBE_EVENTS[0] < cutoff:
         _ANTIPROBE_EVENTS.pop(0)
     if len(_ANTIPROBE_EVENTS) >= ANTIPROBE_STORM_N:
-        _ANTIPROBE_BLOCK_UNTIL = max(_ANTIPROBE_BLOCK_UNTIL, now + ANTIPROBE_STORM_BLOCK)
+        _ANTIPROBE_BLOCK_LEVEL += 1
+        block = min(ANTIPROBE_STORM_BLOCK * (2 ** (_ANTIPROBE_BLOCK_LEVEL - 1)),
+                    ANTIPROBE_BLOCK_MAX)
+        _ANTIPROBE_BLOCK_UNTIL = max(_ANTIPROBE_BLOCK_UNTIL, now + block)
         _ANTIPROBE_EVENTS.clear()
-        log.warning("上游反探测 %.0f 秒内累计 %d 次，熔断 %.0f 秒："
+        log.warning("上游反探测 %.0f 秒内累计 %d 次，熔断 %.0f 秒（第 %d 档）："
                     "期间直接回 429（Retry-After），不再打上游",
-                    ANTIPROBE_STORM_WINDOW, ANTIPROBE_STORM_N, ANTIPROBE_STORM_BLOCK)
+                    ANTIPROBE_STORM_WINDOW, ANTIPROBE_STORM_N, block,
+                    _ANTIPROBE_BLOCK_LEVEL)
+
+
+def clear_antiprobe_backoff() -> None:
+    """上游恢复（有一次成功请求）→ 退避阶梯归零、清空拦截计数。
+
+    不加这个，阶梯就只升不降：一天里攒够的几轮拦截会让白天的单次抖动
+    也吃到几分钟的熔断，越用越慢。
+    """
+    global _ANTIPROBE_BLOCK_LEVEL
+    if _ANTIPROBE_BLOCK_LEVEL:
+        log.info("上游已恢复可用，反探测退避阶梯归零（原第 %d 档）", _ANTIPROBE_BLOCK_LEVEL)
+    _ANTIPROBE_BLOCK_LEVEL = 0
+    _ANTIPROBE_EVENTS.clear()
 
 
 def antiprobe_block_left() -> float:
     """全局熔断还剩多少秒（0 表示没熔断）。"""
     return max(0.0, _ANTIPROBE_BLOCK_UNTIL - time.time())
+
+
+def antiprobe_retry_after() -> int:
+    """建议客户端等待的秒数（向上取整，至少 1）。
+
+    Retry-After 和文案必须用同一个数：以前文案用 %.0f 而头用 int(left)+1，
+    熔断刚够 0.4 秒时文案会印出「请 0 秒后重试」——用户看不懂，还以为网关坏了。
+    """
+    left = antiprobe_block_left()
+    return max(1, int(left) + (1 if left > int(left) else 0))
 
 
 # ===== API 处理器 =====
@@ -1981,10 +2014,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
         # 硬顶着打只会延长上游的拦截窗口（越打越像探测流量）。
         left = antiprobe_block_left()
         if left > 0:
+            secs = antiprobe_retry_after()
             self._send_error(
-                "上游正在拦截本机请求（反探测封禁中），请 %.0f 秒后重试" % left,
+                "上游正在拦截本机请求（反探测封禁中），请 %d 秒后重试" % secs,
                 429, "rate_limit_error",
-                {"Retry-After": str(int(left) + 1)})
+                {"Retry-After": str(secs)})
             return
 
         # 池子里一个能用的号都没有 → 先等最邻近的那个解冻（上限 AVAIL_WAIT_MAX），
@@ -2098,6 +2132,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                         headers_sent = True
                         self.wfile.write(response_data.encode('utf-8'))
                     pool.record_success(account.id)
+                    # 上游已经放行 → 反探测退避阶梯回到第一档
+                    clear_antiprobe_backoff()
 
                     # ===== Token 统计：成功请求落账 =====
                     if stream_tap is not None:
@@ -2227,10 +2263,11 @@ class GatewayHandler(BaseHTTPRequestHandler):
             # 回 429 + Retry-After 让客户端退避，而不是 503 宣告服务不可用。
             left = antiprobe_block_left()
             wait = max(3.0, min(left if left > 0 else ANTIPROBE_FAIL_COOLDOWN, 30.0))
+            secs = max(1, int(wait) + (1 if wait > int(wait) else 0))
             self._send_error(
-                "上游正在拦截本机请求（反探测拦截，%.0f 秒后自动恢复）: %s"
-                % (wait, last_error or "全部账号被拦"),
-                429, "rate_limit_error", {"Retry-After": str(int(wait) + 1)})
+                "上游正在拦截本机请求（反探测拦截，%d 秒后自动恢复）: %s"
+                % (secs, last_error or "全部账号被拦"),
+                429, "rate_limit_error", {"Retry-After": str(secs)})
             return
         self._send_error(
             "No usable account after %d attempt(s): %s" % (len(tried), last_error or "全部失败"),

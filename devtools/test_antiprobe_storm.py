@@ -63,6 +63,7 @@ def start_servers():
     g.wb_usage = None                      # 别把测试写进真实用量
     g._ANTIPROBE_EVENTS.clear()
     g._ANTIPROBE_BLOCK_UNTIL = 0.0
+    g._ANTIPROBE_BLOCK_LEVEL = 0
 
     pool = g.pool
     pool.accounts.clear()
@@ -131,6 +132,45 @@ def main():
         failures.append("熔断期间应立刻返回，实际耗时 %.1fs" % cost)
     if hits_after != hits_before:
         failures.append("熔断期间仍在打上游（%d -> %d）" % (hits_before, hits_after))
+
+    # 文案/头一致性：不能出现「请 0 秒后重试」，Retry-After 至少 1
+    if "0 秒后" in txt:
+        failures.append("429 文案印出了 0 秒: %s" % txt[:120])
+    ra = hd.get("Retry-After")
+    try:
+        if ra is not None and int(ra) < 1:
+            failures.append("Retry-After 必须 >= 1，实际 %s" % ra)
+    except (TypeError, ValueError):
+        failures.append("Retry-After 不是整数: %r" % (ra,))
+
+    # 退避阶梯：第二轮翻倍，成功一次回到第一档
+    def _trip() -> float:
+        """清掉本轮熔断后重新打到熔断，返回这一档还剩多少秒。"""
+        g._ANTIPROBE_BLOCK_UNTIL = 0.0
+        g._ANTIPROBE_EVENTS.clear()
+        for _ in range(g.ANTIPROBE_STORM_N):
+            g.note_antiprobe()
+        return g.antiprobe_block_left()
+
+    # 「剩 0.3 秒」时文案不能退化成「请 0 秒后重试」
+    g._ANTIPROBE_BLOCK_UNTIL = time.time() + 0.3
+    if g.antiprobe_retry_after() < 1:
+        failures.append("熔断剩 0.3s 时 Retry-After 仍应 >= 1，实际 %s"
+                        % g.antiprobe_retry_after())
+    g._ANTIPROBE_BLOCK_UNTIL = 0.0
+
+    g._ANTIPROBE_BLOCK_LEVEL = 0        # 阶梯从第一档开始算
+    lvl1 = _trip()
+    lvl2 = _trip()
+    if not (lvl1 * 1.7 <= lvl2 <= lvl1 * 2.3):
+        failures.append("第二轮熔断应翻倍（%.0f -> %.0f）" % (lvl1, lvl2))
+    g.clear_antiprobe_backoff()
+    lvl1_again = _trip()
+    if not (lvl1 * 0.7 <= lvl1_again <= lvl1 * 1.3):
+        failures.append("成功一次后阶梯应回到第一档（%.0f -> %.0f）" % (lvl1, lvl1_again))
+    if lvl2 > g.ANTIPROBE_BLOCK_MAX:
+        failures.append("熔断不得超过 ANTIPROBE_BLOCK_MAX（%.0f > %.0f）"
+                        % (lvl2, g.ANTIPROBE_BLOCK_MAX))
 
     if failures:
         print("FAIL")
