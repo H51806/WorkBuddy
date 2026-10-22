@@ -81,7 +81,9 @@ AUTH_FAIL_COOLDOWN = 600.0
 #: （上游自己的文案就要求「重新发送」）。旧版把它当普通 400 原样回给客户端，DSH 这类客户端
 #: 不会自动重试，用户就看到一次假失败。这里：先原地重发，再给短冷却换号。
 ANTIPROBE_RETRY_DELAY = 0.8
-ANTIPROBE_MAX_RETRIES = 2
+#: 原地重发次数。实测「拦截窗口」通常以分钟计：重发第 2、3 次几乎从不成功，
+#: 只会把上游调用量翻倍、让上游更认定这是探测流量。留 1 次兜住真正的瞬时抖动。
+ANTIPROBE_MAX_RETRIES = 1
 #: 连拦之后仍然失败 → 该号短冷却。旧的 60 秒在「池里只剩一个号」时等于整整
 #: 一分钟全灭（实测 18:18 连拦三次 → 冷却 60s → DSH 立刻 503）。上游拦截是成串的
 #: 瞬时窗口，几秒就放开，秒级冷却足够，剩下的交给下面的 AVAIL_WAIT_MAX 等解冻。
@@ -2237,7 +2239,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     antiprobe_hits[account.id] = hits + 1
                     last_error = "账号 %s 被上游反探测拦截(code=%s)" % (
                         account.name or account.id[:8], upstream_code or e.code)
-                    if hits < ANTIPROBE_MAX_RETRIES:
+                    # 熔断已打开（说明这一波是成串拦截）时不再原地重发：
+                    # 窗口期内重发必然再被拦，只会白烧掉上游调用额度和信誉。
+                    if hits < ANTIPROBE_MAX_RETRIES and antiprobe_block_left() <= 0:
                         # 指数退避 + 抖动：固定 0.8s 连发三次反而更像探测流量，
                         # 而且总等待太短，骑不过上游的拦截窗口。
                         delay = ANTIPROBE_RETRY_DELAY * (2 ** hits) * (0.75 + random.random() * 0.5)
@@ -2300,11 +2304,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
         if all_antiprobe and antiprobe_hits:
             # 全部失败都是「上游反探测拦截」：这是几秒~几十秒的临时窗口，
             # 回 429 + Retry-After 让客户端退避，而不是 503 宣告服务不可用。
+            # 池里每个号都被拦过一遍 = 这是上游的整段拦截窗口，不是抖动。
+            # 旧版回 6 秒，客户端就每 6 秒回来重打一轮，正好把窗口一直续着。
+            # 现在至少让客户端退避 20 秒（有更长的熔断剩余就按熔断算，封顶 60）。
             left = antiprobe_block_left()
-            wait = max(3.0, min(left if left > 0 else ANTIPROBE_FAIL_COOLDOWN, 30.0))
+            wait = max(20.0, min(left if left > 0 else ANTIPROBE_STORM_BLOCK, 60.0))
             secs = max(1, int(wait) + (1 if wait > int(wait) else 0))
             self._send_error(
-                "上游正在拦截本机请求（反探测拦截，%d 秒后自动恢复）: %s"
+                "上游正在拦截本机请求（反探测临时窗口），请 %d 秒后重试: %s"
                 % (secs, last_error or "全部账号被拦"),
                 429, "rate_limit_error", {"Retry-After": str(secs)})
             return

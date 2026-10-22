@@ -777,6 +777,7 @@ UA 在本分支里是**代码常量**（`wb_tasks.UA_CLI` / `UA_DESKTOP`、`wb_a
 | 新加进 `auths/` 的号在面板上「可用」，但请求永远派不到它 | `wb_pool_policy.scope()` 直接拿 `account.credits` 和 `credit_floor` 比，而「还没采集」和「真的是 0 分」都是 `0`——新号在采集跑过之前必然被判「积分不足」 | `Account` 新增 `credits_known`（`core/wb_gateway.py:239`），`scope()` 只对已知余额做下限判断（`core/wb_pool_policy.py:111/159`），回填真值时置 `True`（`:1142`） |
 | `config.json` 设了 `pool.region`/`pool.credit_floor`，实际派发却完全不遵守 | `_pick_chat_account()` 只看 `_is_available(current)` 就直接用当前号，池策略只在兜底路径生效 | 新增 `_passes_pool_filters()`（`core/wb_gateway.py:1996`），当前号与候选列表都要过 `wb_pool_policy.scope()` |
 | 面板显示账号「可用」却派不到活，看不出是策略挡的还是熔断 | `get_status()` 只在 `not _is_available()` 时才算 `reason`，被区域/积分下限挡住的号既不算不可用、也没原因 | `reason` 改为始终计算并新增 `credits_known` 字段；`unavailable_reason(account, now, credit_floor)` 会给出「积分不足（x < 下限 y）」（`core/wb_pool_policy.py:122`） |
+| 全部账号被 11128 拦住时网关回「6 秒后重试」，客户端就每 6 秒回来打一轮，等于自己把上游的拦截窗口一直续着 | 该分支直接拿账号冷却（6s）当 `Retry-After`，没考虑「整池都被拦 = 上游是一段窗口」 | 该分支最少让客户端退避 **20 秒**（有更长的熔断剩余就按熔断算，封顶 60），文案改成「反探测临时窗口，请 N 秒后重试」；同时原地重发 2 次 → 1 次，且熔断已打开时不再原地重发（`core/wb_gateway.py:2240-2253`、`:2301-2311`、`ANTIPROBE_MAX_RETRIES`） |
 
 回归方式：`python scripts/selfcheck.py --online`（18 模块语法 + 4 段 JS + 16 个 HTTP 端点）全绿；坏请求不再影响账号健康、错误信息带上游原文、未知模型走兜底，均已在本地实测。全流程回归另见 `python devtools/selftest_matrix.py --real`（20 项用例：鉴权 · 选号 · 非流式/流式 · 工具调用 · 错误分档 · 熔断 · 切号 · 面板接口 · 用量），结果记录在 [自测报告](docs/自测报告_2026-10-22.md)。
 

@@ -9,6 +9,7 @@
 3. 熔断期间不再打上游（请求立刻返回，桩计数不增长）。
 """
 import json
+import re
 import sys
 import threading
 import time
@@ -134,7 +135,8 @@ def main():
         failures.append("熔断期间仍在打上游（%d -> %d）" % (hits_before, hits_after))
 
     # 文案/头一致性：不能出现「请 0 秒后重试」，Retry-After 至少 1
-    if "0 秒后" in txt:
+    # 注意用正则而不是 "0 秒后" 子串：20 秒 / 40 秒 里也含 "0 秒"。
+    if re.search(r"请\s*0\s*秒", txt):
         failures.append("429 文案印出了 0 秒: %s" % txt[:120])
     ra = hd.get("Retry-After")
     try:
