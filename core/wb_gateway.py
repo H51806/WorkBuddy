@@ -19,6 +19,7 @@ import json
 import os
 import sys
 import time
+import random
 import threading
 import hashlib
 import uuid
@@ -80,8 +81,14 @@ AUTH_FAIL_COOLDOWN = 600.0
 #: （上游自己的文案就要求「重新发送」）。旧版把它当普通 400 原样回给客户端，DSH 这类客户端
 #: 不会自动重试，用户就看到一次假失败。这里：先原地重发，再给短冷却换号。
 ANTIPROBE_RETRY_DELAY = 0.8
-ANTIPROBE_MAX_RETRIES = 2
-ANTIPROBE_FAIL_COOLDOWN = 60.0
+ANTIPROBE_MAX_RETRIES = 3
+#: 连拦之后仍然失败 → 该号短冷却。旧的 60 秒在「池里只剩一个号」时等于整整
+#: 一分钟全灭（实测 18:18 连拦三次 → 冷却 60s → DSH 立刻 503）。上游拦截是成串的
+#: 瞬时窗口，几秒就放开，秒级冷却足够，剩下的交给下面的 AVAIL_WAIT_MAX 等解冻。
+ANTIPROBE_FAIL_COOLDOWN = 6.0
+#: 全员冷却时最多等这么久（等最邻近的号解冻），等不到才回 503。
+#: 把「2 秒抖动」和「真的没号可用」区分开，而不是一律 503。
+AVAIL_WAIT_MAX = 12.0
 
 # 上游真实可用的模型 id（逐个实测确认，其它名字上游一律回
 # {"code":11102,"msg":"model [x] service info not found"}）。
@@ -336,6 +343,40 @@ class AccountPool:
         if now < acc.cooldown_until:
             return False
         return True
+
+    def nearest_unfreeze(self) -> Optional[float]:
+        """最近一个「会自己解冻」的账号还要多少秒。
+
+        只统计启用且带 token 的账号的冷却 / 熔断截止时间；当前已可用的账号不计入。
+        没有任何账号会自己解冻时返回 None —— 调用方据此决定「等」还是「直接失败」。
+        """
+        now = time.time()
+        waits: List[float] = []
+        for acc in self.accounts.values():
+            if not acc.active or not acc.token:
+                continue
+            until = max(acc.breaker_until, acc.cooldown_until)
+            if until > now:
+                waits.append(until - now)
+        return min(waits) if waits else None
+
+    def wait_for_available(self, timeout: float) -> bool:
+        """在 timeout 秒内等最邻近的账号解冻；等到了返回 True。
+
+        上游反探测拦截（11128）是成串出现的瞬时事件，冷却也只有几秒；如果请求刚好
+        落在冷却窗口里，立刻回 503 会把一次抖动放大成「服务不可用」。这里等一小会儿
+        （上限 timeout，且只等确实会解冻的号），等不到再让调用方回 503。
+        """
+        deadline = time.time() + max(0.0, float(timeout))
+        while True:
+            if any(a.token and self._is_available(a) for a in self.accounts.values()):
+                return True
+            wait = self.nearest_unfreeze()
+            remain = deadline - time.time()
+            # 不会自己解冻、或解冻时间超过剩余预算 → 别浪费时间，直接失败
+            if wait is None or wait <= 0 or remain <= 0 or wait > remain:
+                return False
+            time.sleep(min(wait + 0.15, remain + 0.15))
     
     def record_success(self, acc_id: str):
         """记录成功请求"""
@@ -1891,19 +1932,25 @@ class GatewayHandler(BaseHTTPRequestHandler):
         session_id = request_data.get("user", str(uuid.uuid4()))
         stream = bool(request_data.get("stream"))
 
-        # 池子里一个能用的号都没有 → 直接 503，并把每个号为什么不能用说清楚
-        if not pool.accounts or not any(
-            a.token and pool._is_available(a) for a in pool.accounts.values()
-        ):
-            stuck = pool.unavailable_summary()
-            if stuck:
-                detail = "；".join(
-                    "%s(%s)" % ((x["name"] or x["id"][:8]), x["reason"]) for x in stuck[:4]
-                )
+        def _usable() -> bool:
+            return any(a.token and pool._is_available(a) for a in pool.accounts.values())
+
+        # 池子里一个能用的号都没有 → 先等最邻近的那个解冻（上限 AVAIL_WAIT_MAX），
+        # 等不到才 503，并把每个号为什么不能用说清楚。
+        # 单账号池 + 反探测短冷却时，「立刻 503」会把一次几秒的抖动放大成用户可见失败。
+        if not pool.accounts or not _usable():
+            if pool.accounts and pool.wait_for_available(AVAIL_WAIT_MAX) and _usable():
+                log.info("账号池短暂冷却，等待后已恢复可用，继续处理本次请求")
             else:
-                detail = "账号池为空"
-            self._send_error("No available accounts: %s" % detail, 503)
-            return
+                stuck = pool.unavailable_summary()
+                if stuck:
+                    detail = "；".join(
+                        "%s(%s)" % ((x["name"] or x["id"][:8]), x["reason"]) for x in stuck[:4]
+                    )
+                else:
+                    detail = "账号池为空"
+                self._send_error("No available accounts: %s" % detail, 503)
+                return
 
         # 上游只接受流式请求（非流式实测直接 400 code=11101），所以对上游永远发
         # stream=true；客户端要非流式时用 aggregate_sse_completion 把 SSE 聚合成
@@ -1921,13 +1968,22 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
         tried: List[str] = []
         antiprobe_hits: Dict[str, int] = {}
+        pool_retried = False
         last_error = ""
         # 预算 = 换号次数 + 反探测原地重发次数，避免重发把换号额度吃光
         for _attempt in range(MAX_ACCOUNT_TRIES + ANTIPROBE_MAX_RETRIES):
             account = self._pick_chat_account(session_id, tried)
             if not account or not account.token:
-                last_error = last_error or "没有更多可用账号"
-                break
+                # 号都试过了。若它们只是短暂冷却（反探测 6s / 限流冷却），等解冻后
+                # 清空 tried 再来一轮 —— 只做一次，避免无限挂住客户端。
+                if not pool_retried and pool.wait_for_available(AVAIL_WAIT_MAX):
+                    pool_retried = True
+                    tried.clear()
+                    antiprobe_hits.clear()
+                    account = self._pick_chat_account(session_id, tried)
+                if not account or not account.token:
+                    last_error = last_error or "没有更多可用账号"
+                    break
             tried.append(account.id)
             # 上游地址按账号区域分流：国际版 token 打到国内域名会被 openresty 回 401
             upstream_url = chat_upstream_url(account)
@@ -2049,11 +2105,14 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     last_error = "账号 %s 被上游反探测拦截(code=%s)" % (
                         account.name or account.id[:8], upstream_code or e.code)
                     if hits < ANTIPROBE_MAX_RETRIES:
+                        # 指数退避 + 抖动：固定 0.8s 连发三次反而更像探测流量，
+                        # 而且总等待太短，骑不过上游的拦截窗口。
+                        delay = ANTIPROBE_RETRY_DELAY * (2 ** hits) * (0.75 + random.random() * 0.5)
                         log.warning("账号 %s 被上游拦截(code=%s)，%.1fs 后原地重发（第 %d/%d 次）",
                                     account.id[:8], upstream_code or e.code,
-                                    ANTIPROBE_RETRY_DELAY, hits + 1, ANTIPROBE_MAX_RETRIES)
+                                    delay, hits + 1, ANTIPROBE_MAX_RETRIES)
                         tried.pop()  # 原地重发不算这个号已试过
-                        time.sleep(ANTIPROBE_RETRY_DELAY)
+                        time.sleep(delay)
                         continue
                     log.warning("账号 %s 连续被上游拦截(code=%s)，冷却 %.0fs 后换号",
                                 account.id[:8], upstream_code or e.code, ANTIPROBE_FAIL_COOLDOWN)
