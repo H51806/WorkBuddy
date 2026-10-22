@@ -81,7 +81,7 @@ AUTH_FAIL_COOLDOWN = 600.0
 #: （上游自己的文案就要求「重新发送」）。旧版把它当普通 400 原样回给客户端，DSH 这类客户端
 #: 不会自动重试，用户就看到一次假失败。这里：先原地重发，再给短冷却换号。
 ANTIPROBE_RETRY_DELAY = 0.8
-ANTIPROBE_MAX_RETRIES = 3
+ANTIPROBE_MAX_RETRIES = 2
 #: 连拦之后仍然失败 → 该号短冷却。旧的 60 秒在「池里只剩一个号」时等于整整
 #: 一分钟全灭（实测 18:18 连拦三次 → 冷却 60s → DSH 立刻 503）。上游拦截是成串的
 #: 瞬时窗口，几秒就放开，秒级冷却足够，剩下的交给下面的 AVAIL_WAIT_MAX 等解冻。
@@ -89,6 +89,14 @@ ANTIPROBE_FAIL_COOLDOWN = 6.0
 #: 全员冷却时最多等这么久（等最邻近的号解冻），等不到才回 503。
 #: 把「2 秒抖动」和「真的没号可用」区分开，而不是一律 503。
 AVAIL_WAIT_MAX = 12.0
+#: 反探测「成串出现」时的全局熔断。实测 19:25 那一波：DSH 每个请求会变成
+#: 3 次原地重发 × 2 个账号 = 8 次上游调用，DSH 自己又每 8 秒重试一次，
+#: 于是「一秒钟的抖动」被放大成整分钟的打点风暴，上游反而更不肯放开。
+#: 这里在 ANTIPROBE_STORM_WINDOW 秒内累计 ANTIPROBE_STORM_N 次拦截后，
+#: 直接对客户端回 429 + Retry-After，期间一个上游请求都不发。
+ANTIPROBE_STORM_N = 8
+ANTIPROBE_STORM_WINDOW = 30.0
+ANTIPROBE_STORM_BLOCK = 20.0
 
 # 上游真实可用的模型 id（逐个实测确认，其它名字上游一律回
 # {"code":11102,"msg":"model [x] service info not found"}）。
@@ -1495,6 +1503,34 @@ def account_auth_summary() -> List[Dict[str, Any]]:
     return items
 
 
+# ===== 反探测全局熔断 =====
+# 上游 11128 是成串出现的：一个用户请求会变成多次上游调用，客户端又在重试，
+# 越打越不放开。这里做进程级节流——短窗口内拦截次数过多就直接对客户端 429。
+_ANTIPROBE_EVENTS: List[float] = []
+_ANTIPROBE_BLOCK_UNTIL = 0.0
+
+
+def note_antiprobe() -> None:
+    """记录一次上游反探测拦截；短窗口内累计够多就打开全局熔断。"""
+    global _ANTIPROBE_BLOCK_UNTIL
+    now = time.time()
+    _ANTIPROBE_EVENTS.append(now)
+    cutoff = now - ANTIPROBE_STORM_WINDOW
+    while _ANTIPROBE_EVENTS and _ANTIPROBE_EVENTS[0] < cutoff:
+        _ANTIPROBE_EVENTS.pop(0)
+    if len(_ANTIPROBE_EVENTS) >= ANTIPROBE_STORM_N:
+        _ANTIPROBE_BLOCK_UNTIL = max(_ANTIPROBE_BLOCK_UNTIL, now + ANTIPROBE_STORM_BLOCK)
+        _ANTIPROBE_EVENTS.clear()
+        log.warning("上游反探测 %.0f 秒内累计 %d 次，熔断 %.0f 秒："
+                    "期间直接回 429（Retry-After），不再打上游",
+                    ANTIPROBE_STORM_WINDOW, ANTIPROBE_STORM_N, ANTIPROBE_STORM_BLOCK)
+
+
+def antiprobe_block_left() -> float:
+    """全局熔断还剩多少秒（0 表示没熔断）。"""
+    return max(0.0, _ANTIPROBE_BLOCK_UNTIL - time.time())
+
+
 # ===== API 处理器 =====
 
 class GatewayHandler(BaseHTTPRequestHandler):
@@ -1515,17 +1551,21 @@ class GatewayHandler(BaseHTTPRequestHandler):
         
         return False
     
-    def _send_json(self, data: Dict, status: int = 200):
+    def _send_json(self, data: Dict, status: int = 200,
+                   headers: Optional[Dict[str, str]] = None):
         """发送 JSON 响应"""
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+        for k, v in (headers or {}).items():
+            self.send_header(k, str(v))
         self.end_headers()
         self.wfile.write(json.dumps(data, ensure_ascii=False).encode('utf-8'))
     
-    def _send_error(self, message: str, status: int = 400, error_type: str = ""):
+    def _send_error(self, message: str, status: int = 400, error_type: str = "",
+                    headers: Optional[Dict[str, str]] = None):
         """发送错误响应。
 
         error_type 缺省时按状态码推断：以前 5xx 也一律标成 invalid_request_error，
@@ -1539,6 +1579,8 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 error_type = "authentication_error"
             elif status == 404:
                 error_type = "not_found_error"
+            elif status == 429:
+                error_type = "rate_limit_error"
             else:
                 error_type = "invalid_request_error"
         self._send_json({
@@ -1547,7 +1589,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 "type": error_type,
                 "code": status
             }
-        }, status)
+        }, status, headers)
     
     def do_OPTIONS(self):
         """处理 CORS 预检"""
@@ -1889,7 +1931,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             return None
         if wb_pool_policy is not None:
             try:
-                ordered = wb_pool_policy.order_priority(rest)
+                ordered = wb_pool_policy.order_priority(rest, time.time())
                 if ordered:
                     return ordered[0]
             except Exception as exc:
@@ -1935,6 +1977,16 @@ class GatewayHandler(BaseHTTPRequestHandler):
         def _usable() -> bool:
             return any(a.token and pool._is_available(a) for a in pool.accounts.values())
 
+        # 反探测成串来袭时先自保：直接回 429 + Retry-After，一个上游请求都不发。
+        # 硬顶着打只会延长上游的拦截窗口（越打越像探测流量）。
+        left = antiprobe_block_left()
+        if left > 0:
+            self._send_error(
+                "上游正在拦截本机请求（反探测封禁中），请 %.0f 秒后重试" % left,
+                429, "rate_limit_error",
+                {"Retry-After": str(int(left) + 1)})
+            return
+
         # 池子里一个能用的号都没有 → 先等最邻近的那个解冻（上限 AVAIL_WAIT_MAX），
         # 等不到才 503，并把每个号为什么不能用说清楚。
         # 单账号池 + 反探测短冷却时，「立刻 503」会把一次几秒的抖动放大成用户可见失败。
@@ -1968,6 +2020,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
 
         tried: List[str] = []
         antiprobe_hits: Dict[str, int] = {}
+        # 本次请求是否「只被上游反探测拦过」——是的话结尾该回 429（稍后重试），
+        # 而不是 503（客户端会当成「服务端坏了 / 别重试了」）。
+        all_antiprobe = True
         pool_retried = False
         last_error = ""
         # 预算 = 换号次数 + 反探测原地重发次数，避免重发把换号额度吃光
@@ -2099,6 +2154,9 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     model_hint=up_body.get("model", ""),
                 )
 
+                if is_antiprobe:
+                    note_antiprobe()
+
                 if is_antiprobe and not headers_sent:
                     hits = antiprobe_hits.get(account.id, 0)
                     antiprobe_hits[account.id] = hits + 1
@@ -2133,6 +2191,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                     return
 
                 if is_auth_error:
+                    all_antiprobe = False
                     # 401/403 = 上游不认这把凭据（过期 / 区域不对 / 换端）。让它单独
                     # 冷却一段时间，然后换下一个账号重试。
                     account.cooldown_until = time.time() + AUTH_FAIL_COOLDOWN
@@ -2163,6 +2222,16 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 return
 
         # 池子里的号都试过了还是不行
+        if all_antiprobe and antiprobe_hits:
+            # 全部失败都是「上游反探测拦截」：这是几秒~几十秒的临时窗口，
+            # 回 429 + Retry-After 让客户端退避，而不是 503 宣告服务不可用。
+            left = antiprobe_block_left()
+            wait = max(3.0, min(left if left > 0 else ANTIPROBE_FAIL_COOLDOWN, 30.0))
+            self._send_error(
+                "上游正在拦截本机请求（反探测拦截，%.0f 秒后自动恢复）: %s"
+                % (wait, last_error or "全部账号被拦"),
+                429, "rate_limit_error", {"Retry-After": str(int(wait) + 1)})
+            return
         self._send_error(
             "No usable account after %d attempt(s): %s" % (len(tried), last_error or "全部失败"),
             503,
