@@ -234,6 +234,9 @@ class Account:
     breaker_until: float = 0  # 熔断器截止时间
     cooldown_until: float = 0  # 冷却截止时间
     balance_checked_at: float = 0
+    #: credits 是否已经采集过。默认 True 是为了兼容老 state.json（那里存的是真余额）；
+    #: 新建账号时由 _normalize_auth_file 显式算出，没采集过就是 False。
+    credits_known: bool = True
 
 
 @dataclass
@@ -341,8 +344,12 @@ class AccountPool:
         if wb_pool_policy is None:
             return []
         return [
-            {"id": acc.id, "name": acc.name, "reason": wb_pool_policy.unavailable_reason(acc)}
-            for acc in self.accounts.values() if not self._is_available(acc)
+            {"id": acc.id, "name": acc.name,
+             "reason": wb_pool_policy.unavailable_reason(acc, credit_floor=self.credit_floor)}
+            for acc in self.accounts.values()
+            if not self._is_available(acc)
+            or (self.credit_floor and wb_pool_policy.credits_known(acc)
+                and acc.credits < float(self.credit_floor))
         ]
 
     def _is_available(self, acc: Account) -> bool:
@@ -522,9 +529,14 @@ class AccountPool:
                     "last_used": acc.last_used,
                     # 区域与不可用原因直接算好给面板：面板不该再去猜「为什么这个号不派活」。
                     "region": _usage_region_of(acc),
+                    "credits_known": (
+                        wb_pool_policy.credits_known(acc) if wb_pool_policy is not None else True
+                    ),
+                    # 原因一直算：积分下限把号挡在候选池外时也要说清，
+                    # 否则面板显示「可用」、请求却说没有可用账号。
                     "reason": (
-                        wb_pool_policy.unavailable_reason(acc, now)
-                        if (wb_pool_policy is not None and not self._is_available(acc)) else ""
+                        wb_pool_policy.unavailable_reason(acc, now, self.credit_floor)
+                        if wb_pool_policy is not None else ""
                     ),
                 }
                 for acc in self.accounts.values()
@@ -975,15 +987,20 @@ def _normalize_auth_file(auth_file: Path) -> Optional[Account]:
     phone = mask_phone(str(
         account.get("phone") or raw.get("phone") or claims.get("preferred_username") or ""
     ))
+    raw_credits = raw.get("credits")
+    if raw_credits is None:
+        raw_credits = account.get("credits")
     return Account(
         id=uid,
         name=nickname,
         token=token,
         phone=phone,
         domain=str(auth.get("domain") or claims.get("iss") or ""),
-        credits=int(raw.get("credits") or account.get("credits") or 0),
+        credits=int(raw_credits or 0),
         energy=int(raw.get("energy") or account.get("energy") or 0),
         active=bool(raw.get("active", True)),
+        # 认证文件里没写余额 = 还没采集过，不能当成「余额 0」被积分下限踢掉。
+        credits_known=raw_credits is not None,
     )
 
 
@@ -1122,24 +1139,26 @@ def _enrich_pool_credits() -> None:
     except Exception:
         pass
 
+    def _apply(acc: Account, record: Dict[str, Any]) -> None:
+        acc.credits = record.get("credits") or 0
+        acc.energy = record.get("energy") or 0
+        # 回填到真值就算「余额已知」了：否则积分下限会一直把它当未采集而跳过。
+        acc.credits_known = True
+
     for acc in pool.accounts.values():
         # 1) 手机号匹配
         if acc.phone and acc.phone in phone_to_name:
             match_name = phone_to_name[acc.phone]
             if match_name in latest:
-                acc.credits = latest[match_name].get("credits") or 0
-                acc.energy = latest[match_name].get("energy") or 0
+                _apply(acc, latest[match_name])
                 continue
         # 2) nickname 匹配 config name
         if acc.name and acc.name in config_names and acc.name in latest:
-            acc.credits = latest[acc.name].get("credits") or 0
-            acc.energy = latest[acc.name].get("energy") or 0
+            _apply(acc, latest[acc.name])
             continue
         # 3) 唯一兜底
         if len(pool.accounts) == 1 and len(latest) == 1:
-            only = next(iter(latest.values()))
-            acc.credits = only.get("credits") or 0
-            acc.energy = only.get("energy") or 0
+            _apply(acc, next(iter(latest.values())))
 
 
 # ===== 实时积分余额（billing meter API，30s 缓存） =====
@@ -1678,6 +1697,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
                         if remain > 0 or total > 0:
                             acc.credits = remain
                             acc.energy = total
+                            acc.credits_known = True
             except Exception:
                 pass
             status = pool.get_status()
@@ -1950,7 +1970,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
         current_id = pool.current_account_id
         if current_id and current_id in pool.accounts and current_id not in exclude:
             candidate = pool.accounts[current_id]
-            if pool._is_available(candidate) and candidate.token:
+            if pool._is_available(candidate) and candidate.token and self._passes_pool_filters(candidate):
                 return candidate
         picked = pool.pick(session_id)
         if picked is not None and picked.id not in exclude and picked.token:
@@ -1960,6 +1980,7 @@ class GatewayHandler(BaseHTTPRequestHandler):
             acc for acc in pool.accounts.values()
             if acc.id not in exclude and pool._is_available(acc) and acc.token
         ]
+        rest = [acc for acc in rest if self._passes_pool_filters(acc)]
         if not rest:
             return None
         if wb_pool_policy is not None:
@@ -1971,6 +1992,24 @@ class GatewayHandler(BaseHTTPRequestHandler):
                 log.warning("兜底选号失败，改用最久未用优先: %s", exc)
         rest.sort(key=lambda a: (-a.last_used, -a.credits, a.id))
         return rest[0]
+
+    def _passes_pool_filters(self, account) -> bool:
+        """账号是否通过池策略的区域 / 积分下限过滤。
+
+        聊天派发以前只看 _is_available（启用 + 未熔断 + 未冷却），于是 config.json 里
+        配了 region / credit_floor 也等于没配：只要当前账号「技术上可用」就直接用，
+        策略只对 pick() 那条路径生效。这里把两条路径对齐。
+        """
+        if wb_pool_policy is None:
+            return True
+        try:
+            kept = wb_pool_policy.scope(
+                [account], region=pool.region or None, credit_floor=pool.credit_floor,
+            )
+        except Exception as exc:
+            log.warning("池策略过滤失败，按通过处理: %s", exc)
+            return True
+        return bool(kept)
 
     def _send_account_headers(self, account, model_name: str = "") -> None:
         """把「这一次用的是哪个账号」写进响应头，方便在 DSH / curl 侧核对。

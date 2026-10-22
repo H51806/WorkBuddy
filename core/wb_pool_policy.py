@@ -108,7 +108,19 @@ def is_available(account: Any, now: Optional[float] = None) -> bool:
     return True
 
 
-def unavailable_reason(account: Any, now: Optional[float] = None) -> str:
+def credits_known(account: Any) -> bool:
+    """这个号的余额是不是「已经采集过」。
+
+    credits 默认 0，没法区分「余额真的是 0」和「还没采集过」。老代码把两者
+    当同一件事，于是刚加进来、还没刷过余额的号会被积分下限静默踢出候选池，
+    面板却仍显示可用 —— 表现就是「号明明在，请求却说没有可用账号」。
+    这里用显式标记区分：未知余额不参与下限过滤。
+    """
+    return bool(getattr(account, "credits_known", True))
+
+
+def unavailable_reason(account: Any, now: Optional[float] = None,
+                       credit_floor: float = 0.0) -> str:
     ts = time.time() if now is None else float(now)
     if not bool(getattr(account, "active", True)):
         return "停用"
@@ -118,6 +130,10 @@ def unavailable_reason(account: Any, now: Optional[float] = None) -> str:
     left = _num(account, "cooldown_until") - ts
     if left > 0:
         return "冷却中 %.1f 分钟" % (left / 60.0)
+    if credit_floor and credits_known(account):
+        credits = _num(account, "credits")
+        if credits < float(credit_floor):
+            return "积分不足（%g < 下限 %g）" % (credits, float(credit_floor))
     return ""
 
 
@@ -138,7 +154,10 @@ def scope(
             continue
         if not is_available(account, now):
             continue
-        if credit_floor and _num(account, "credits") < float(credit_floor):
+        # 余额未采集（credits_known=False）不等于余额不足：新号还没刷过额度时
+        # credits 恒为 0，按下限过滤会把刚加的号直接踢掉，且 reason 为空、
+        # 面板显示「可用」，排查时无从下手。未知余额一律不参与下限过滤。
+        if credit_floor and credits_known(account) and _num(account, "credits") < float(credit_floor):
             continue
         out.append(account)
     return out

@@ -313,7 +313,7 @@ curl -s http://127.0.0.1:7863/v1/chat/completions \
 | `usage.flush_interval_seconds` | `5` | 用量落盘间隔（秒） |
 | `pool.distribution` | `priority` | 分配策略：`priority` / `round-robin` / `balanced` / `sticky`（别名如 `rr`、`lru`、`sticky-session` 见 core/wb_pool_policy.py:57） |
 | `pool.region` | 空 | 区域过滤：空或 `merged` = 国内外混合；`cn` / `global` = 只用该区账号 |
-| `pool.credit_floor` | `0`（示例 `100`） | 积分保底：余额低于该值的账号不再参与选号（`0` = 关闭） |
+| `pool.credit_floor` | `0`（示例 `100`） | 积分保底：余额低于该值的账号不再参与选号（`0` = 关闭）。**余额还没采集到（`credits_known=false`）的号不参与该判断**——新加入的号不会因为「暂时读到 0 分」被静默踢出池子 |
 | `pool.prefer_expiring` | `true` | 快过期积分软加权（弱于会话粘性与所选策略本身） |
 | `pool.expiring_soon` | `168h` | 快过期加权窗口（`0` = 关闭） |
 | `pool.idle_weight_per_hour` | `0.5` | 闲置补偿：每小时未使用 +0.5 权重 |
@@ -361,7 +361,7 @@ Python 版**只读一个**环境变量：
 | `balanced` | 均衡分配 | 闲置越久权重越大，随机但偏向冷号 |
 | `sticky` | 对话粘性 | 一个对话固定一个账号，保住上游 prompt 缓存 |
 
-候选筛选（`wb_pool_policy.scope`）：停用（`active=false`）、熔断中、软冷却中的号直接排除；`pool.region` 非空时只留该区域的号（`""`/`merged` = 跨区混池，区域由凭据域名判断：含 `workbuddy.ai` = 国际版）；`pool.credit_floor` 以上的号才参与（积分低于下限的号会被判「积分不足」）。
+候选筛选（`wb_pool_policy.scope`）：停用（`active=false`）、熔断中、软冷却中的号直接排除；`pool.region` 非空时只留该区域的号（`""`/`merged` = 跨区混池，区域由凭据域名判断：含 `workbuddy.ai` = 国际版）；`pool.credit_floor` 以上的号才参与（积分低于下限的号会被判「积分不足」）；但**余额未知（`credits_known=false`，还没采集过）的号不参与下限过滤**——「没采集到」和「真的是 0 分」必须区分开，否则新号一加进来就被当成空号。这套筛选不只在兜底路径生效：`_pick_chat_account()` 对「当前账号」和候选列表都调用 `_passes_pool_filters()`（`core/wb_gateway.py:1996`），所以 `region` / `credit_floor` 对每一个请求都有效。
 
 排名规则：
 
@@ -584,9 +584,9 @@ WorkBuddy_统一管理器/
 │   ├─ browser_check.py       真浏览器点按钮自检（需要 playwright）
 │   └─ test_webui.py          老控制台小测试
 ├─ configs/         config.py（老式账号表；网关不读）、config.example.json
-├─ docs/            ARCHITECTURE.md · DSH接入说明.md · 测试报告.md · dsh/cordis.workbuddy.patch.yml
+├─ docs/            ARCHITECTURE.md · DSH接入说明.md · 测试报告.md · 自测报告_2026-10-22.md · dsh/cordis.workbuddy.patch.yml
 ├─ static/          面板前端（index.html / app.css / app.js / sw.js / manifest / 图标）
-├─ devtools/        冒烟测试台（_smoke_runner.js）
+├─ devtools/        冒烟测试台与自测：selftest_matrix.py（桩上游 + 真上游全流程 20 项）· test_antiprobe_storm.py（11128 风暴 / 阶梯退避）· _smoke_runner.js
 ├─ 一键启动.bat     Windows 启动器（兼容根目录与 WorkBuddy_* 子目录两种布局）
 ├─ config.json      网关运行时配置（首次启动自动生成，已被 .gitignore 排除）
 └─ data/ wb_data/ auths/   运行时数据（已被 .gitignore 排除）
@@ -774,8 +774,11 @@ UA 在本分支里是**代码常量**（`wb_tasks.UA_CLI` / `UA_DESKTOP`、`wb_a
 | 克隆下来直接跑，采集器会拿示例账号去扫码登录 | 示例移入独立模板 `configs/config.example.py`（全部注释掉，克隆者不会拿假账号扫码）；`configs/config.py` 本地私有并加入 `.gitignore`，含真实账号也不入库 |
 | 仓库目录里双击 `一键启动.bat` 直接报 `[ERROR] App folder not found` | 启动器只会找 `%~dp0WorkBuddy_*` 子目录，而本仓库根目录就是应用目录 | 先认当前目录的 `scripts\main.py`，找不到再退化去找子目录；新增 `.gitattributes` 强制 `.bat` 保持 CRLF |
 | 7863 端口被上一次的网关占着时，只打印一句「网关启动失败」 | 没区分「端口占用」和「真的没起来」 | `scripts/main.py` 新增 `port_in_use()`，占用时直接给出 `netstat -ano` + `findstr :7863` 查 PID、`taskkill /PID <PID> /F` 的下一步 |
+| 新加进 `auths/` 的号在面板上「可用」，但请求永远派不到它 | `wb_pool_policy.scope()` 直接拿 `account.credits` 和 `credit_floor` 比，而「还没采集」和「真的是 0 分」都是 `0`——新号在采集跑过之前必然被判「积分不足」 | `Account` 新增 `credits_known`（`core/wb_gateway.py:239`），`scope()` 只对已知余额做下限判断（`core/wb_pool_policy.py:111/159`），回填真值时置 `True`（`:1142`） |
+| `config.json` 设了 `pool.region`/`pool.credit_floor`，实际派发却完全不遵守 | `_pick_chat_account()` 只看 `_is_available(current)` 就直接用当前号，池策略只在兜底路径生效 | 新增 `_passes_pool_filters()`（`core/wb_gateway.py:1996`），当前号与候选列表都要过 `wb_pool_policy.scope()` |
+| 面板显示账号「可用」却派不到活，看不出是策略挡的还是熔断 | `get_status()` 只在 `not _is_available()` 时才算 `reason`，被区域/积分下限挡住的号既不算不可用、也没原因 | `reason` 改为始终计算并新增 `credits_known` 字段；`unavailable_reason(account, now, credit_floor)` 会给出「积分不足（x < 下限 y）」（`core/wb_pool_policy.py:122`） |
 
-回归方式：`python scripts/selfcheck.py --online`（18 模块语法 + 4 段 JS + 16 个 HTTP 端点）全绿；坏请求不再影响账号健康、错误信息带上游原文、未知模型走兜底，均已在本地实测。
+回归方式：`python scripts/selfcheck.py --online`（18 模块语法 + 4 段 JS + 16 个 HTTP 端点）全绿；坏请求不再影响账号健康、错误信息带上游原文、未知模型走兜底，均已在本地实测。全流程回归另见 `python devtools/selftest_matrix.py --real`（20 项用例：鉴权 · 选号 · 非流式/流式 · 工具调用 · 错误分档 · 熔断 · 切号 · 面板接口 · 用量），结果记录在 [自测报告](docs/自测报告_2026-10-22.md)。
 
 ### 2026-10-17：真机试跑修复
 
