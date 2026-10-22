@@ -269,6 +269,34 @@ def accept_task(acc: Dict[str, Any], code: str) -> Tuple[int, Dict[str, Any]]:
                         body={"task_codes": [code]}, origin=CHAT_BASE, ua=UA_CLI)
 
 
+def ensure_task_accepted(acc: Dict[str, Any], task: Dict[str, Any],
+                         settle: float = 1.5) -> Dict[str, Any]:
+    """确保任务已被 accept —— 上游只有 accepted 之后才为这个任务记录进度。
+
+    实测（新账号 9744df38）：未 accept 时 /growth/tasks 里 progress 是 null、
+    accept_status 是 not_accepted；此时上报 /v2/report 上游回 200 但把事件
+    静默丢弃，进度永远 0/0。accept 之后同一份事件立刻被计入
+    （0/1 → 1/1 completed）。已 accepted/completed/claimed 的原样返回，
+    所以对老账号（任务早已 claimed）是零效果。
+    """
+    code = task.get("task_code") or task.get("code")
+    status = (task.get("accept_status") or "").lower()
+    if status in ("accepted", "completed", "claimed"):
+        return task
+    try:
+        st, body = accept_task(acc, code)
+    except Exception as e:
+        log.warning(f"接受任务失败 {code}: {e}")
+        return task
+    _code = body.get("code") if isinstance(body, dict) else None
+    if st != 200 or str(_code) not in ("0", "200"):
+        log.warning(f"接受任务失败 {code}: HTTP {st} code={_code}")
+        return task
+    log.info(f"任务 {code} 原先未被接受（{status or 'unknown'}），已 accept")
+    fresh = refetch_task(acc, code, settle=settle, old_task=task)
+    return fresh or task
+
+
 def claim_task(acc: Dict[str, Any], code: str) -> Tuple[int, Dict[str, Any]]:
     """Web 域领奖。上游实测（panel-main tasks.go:227）：
     路径 = {webBase}/activity/growth/tasks/<code>/claim（任务码在路径里，body 为空）
@@ -820,6 +848,15 @@ def run_chat_5(acc: Dict[str, Any], task: Dict[str, Any], dry_run: bool, count: 
     if count > 0:
         need = min(need, count)
     if need <= 0:
+        if target <= 0:
+            # target=0 不是「已经满足」，而是上游还没为这个任务定义目标
+            # （未 accept 时 progress 为 null）。旧实现把它当成功，
+            # 界面显示「已满足 0/0」，实际上这个任务根本没被上游记录。
+            res.update({"ok": False, "skipped": False, "effect": "未计入进度",
+                        "msg": f"上游没有该任务的进度目标（{cur}/{target}，"
+                               f"accept_status={task.get('accept_status')}），无法判定完成"})
+            _record_outcome(res, acc, task, dry_run)
+            return res
         res.update({"skipped": True, "ok": True, "msg": f"已满足 {cur}/{target}"})
         return res
     if dry_run:
@@ -887,6 +924,15 @@ def _record_outcome(res: Dict[str, Any], acc: Dict[str, Any], task: Dict[str, An
     }
     claimed = fresh.get("accept_status") == "claimed"
     target_met = bool(ft) and fc >= ft
+
+    if fresh.get("progress") is None and not ft and not claimed:
+        # progress 为 null = 上游根本没有这个任务的进度记录（通常是从没 accept，
+        # 或活动未对账号开放）。这和「已经 0/0 所以不用做」是两件事，不能报 ok。
+        res["effect"] = "未计入进度"
+        res["ok"] = False
+        res["msg"] = (f"上游没有该任务的进度记录（progress 为空，"
+                      f"accept_status={fresh.get('accept_status')}）：事件被静默丢弃")
+        return
 
     if fc > cur:
         res["effect"] = "已计入进度"
@@ -1316,6 +1362,10 @@ def run_task(acc: Dict[str, Any], task: Dict[str, Any], dry_run: bool = False) -
     fn = actions.get(kind)
     if not fn:
         return {"code": code, "ok": False, "skipped": True, "msg": "该任务当前不支持纯 API 自动完成"}
+    if not dry_run:
+        # 成长任务必须先 accept，上游才开始记录进度。集中在这一处做，
+        # 就能覆盖下面所有 run_*，不必每个动作各自实现一遍。
+        task = ensure_task_accepted(acc, task)
     return fn(acc, task, dry_run=dry_run)
 
 
